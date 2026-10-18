@@ -376,8 +376,8 @@ function frame() {
     tr.marker.setLngLat(here);
     // Sprite points east; marker rotation is clockwise from north.
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
-    if (dx || dy) { tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90); tr.theta = Math.atan2(dy, dx); }
-    Object.assign(tr, { l: pos.l, here });
+    if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
+    Object.assign(tr, { l: pos.l, here, d: pos.d, sign: pos.sign });
     const stn = pos.l.stations[row[4 + pos.next * 3]].name;
     tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
@@ -404,7 +404,8 @@ async function trainLayer() {
   scene.add(sun);
   const mat = (c) => new THREE.MeshLambertMaterial({ color: c, side: THREE.DoubleSide }); // DoubleSide: the y-flip mirrors faces
   const white = mat(0xf2f2f2), glass = mat(0x1d232b), red = mat(0xd30f1d), grey = mat(0x8a9096);
-  const LEN = { 1: 98, 2: 81, 4: 81 }; // metres: Line 1 Citadis Spirit pair, Line 2/4 Stadler FLIRT
+  // ponytail: every line uses the Citadis model for now; Lines 2/4 run Stadler FLIRTs (81 m), a separate model later.
+  const LEN = { 1: 98, 2: 81, 4: 81 }; // metres
   // Model axes: x = forward, y = left, z = up. Geometry is built once per line and shared by every train.
   const W = 2.65, BASE = 0.5, TOP = 3.5; // metres: car width, floor and roof height
   const placed = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); return o; };
@@ -422,39 +423,45 @@ async function trainLayer() {
   const FRONT = [[2.25, 0.5], [2.55, 0.85], [2.7, 1.4], [2.6, 2.1], [2.25, 2.8], [1.5, 3.3], [0, 3.5]]; // [x, z]
   const frontX = (z) => { for (let i = 1; i < FRONT.length; i++) { const [x0, z0] = FRONT[i - 1], [x1, z1] = FRONT[i];
     if (z <= z1) return x0 + (x1 - x0) * (z - z0) / (z1 - z0); } return 0; };
+  // The nose starts at the body end (its rounded edge reaches back to x = 0, no further) and is 4 cm narrower than the
+  // body: overlapping coplanar faces there were z-fighting (the flicker by the windshield).
   function noseBand(z0, z1) {
-    const bev = 0.3, sh = new THREE.Shape(), pts = FRONT.filter(([, z]) => z > z0 && z < z1);
-    sh.moveTo(-0.5, z0); sh.lineTo(frontX(z0) - bev, z0);
+    const bev = 0.3, nw = W - 0.04 - 2 * bev, sh = new THREE.Shape(), pts = FRONT.filter(([, z]) => z > z0 && z < z1);
+    sh.moveTo(bev, z0); sh.lineTo(frontX(z0) - bev, z0);
     for (const [x, z] of pts) sh.lineTo(x - bev, z);
-    sh.lineTo(Math.max(0, frontX(z1) - bev), z1); sh.lineTo(-0.5, z1); sh.closePath();
-    const g = new THREE.ExtrudeGeometry(sh, { depth: W - 2 * bev, bevelEnabled: true, bevelSize: bev, bevelThickness: bev, bevelSegments: 3, curveSegments: 6 });
-    return g.applyMatrix4(new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, -1, (W - 2 * bev) / 2, 0, 1, 0, 0, 0, 0, 0, 1)); // (x,y,z) -> (x, -z, y), centred
+    sh.lineTo(Math.max(bev + 0.1, frontX(z1) - bev), z1); sh.lineTo(bev, z1); sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: nw, bevelEnabled: true, bevelSize: bev, bevelThickness: bev, bevelSegments: 3, curveSegments: 6 });
+    return g.applyMatrix4(new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, -1, nw / 2, 0, 1, 0, 0, 0, 0, 0, 1)); // (x,y,z) -> (x, -z, y), centred
   }
   // The rounded bevel grows each band by 0.3 m, so the outer bands stop 0.3 m short to sit flush with floor and roof.
   const NOSE = [[noseBand(0.8, 1.45), red], [noseBand(1.45, 2.95), glass], [noseBand(2.95, 3.2), white]];
   const cache = {};
+  // A train is a list of parts, each placed on the track on its own so the train bends through curves:
+  // 4 cars (the end ones carry the cabs) and the articulation joints between them. x = part centre, metres from mid-train.
   function model(l) {
     const len = LEN[l.name], cars = 4, gap = 0.8, cl = (len - gap * (cars - 1)) / cars;
-    const c = (cache[l.name] ||= { body: bodyGeo(cl), win: box(cl - 2, W + 0.06, 0.95), stripe: box(cl, W + 0.04, 0.28), swoosh: box(7, W + 0.05, 1.1),
-      bellows: box(gap + 0.2, W - 0.3, TOP - BASE - 0.3), panto: box(5, 1.2, 0.4), line: mat(l.color) });
-    const g = new THREE.Group();
+    // Overlays sit >= 4 cm apart (stripe < window band < swoosh) so they never fight for the same depth.
+    const c = (cache[l.name] ||= { body: bodyGeo(cl), win: box(cl - 2, W + 0.08, 0.95), stripe: box(cl, W + 0.04, 0.28), swoosh: box(7, W + 0.14, 1.1),
+      bellows: box(gap + 0.4, W - 0.3, TOP - BASE - 0.3), panto: box(5, 1.2, 0.4), line: mat(l.color) });
+    const root = new THREE.Group(), parts = [];
+    const part = (x) => { const g = new THREE.Group(); root.add(g); parts.push({ g, x }); return g; };
     for (let i = 0; i < cars; i++) {
-      const x = -len / 2 + cl / 2 + i * (cl + gap);
-      g.add(placed(c.body, white, x, 0, 0));
-      g.add(placed(c.win, glass, x, 0, 2.55)); // window band
-      g.add(placed(c.stripe, c.line, x, 0, 1.3)); // line-colour stripe
-      if (i < cars - 1) g.add(placed(c.bellows, glass, x + cl / 2 + gap / 2, 0, (TOP + BASE) / 2)); // articulation
+      const g = part(-len / 2 + cl / 2 + i * (cl + gap));
+      g.add(placed(c.body, white, 0, 0, 0));
+      g.add(placed(c.win, glass, 0, 0, 2.55)); // window band
+      g.add(placed(c.stripe, c.line, 0, 0, 1.3)); // line-colour stripe
+      if (i === 1) g.add(placed(c.panto, grey, 0, 0, TOP + 0.2)); // pantograph
+      if (i === 0 || i === cars - 1) { // a cab at both ends, like the real (double-ended) train
+        const end = i === 0 ? -1 : 1, cab = new THREE.Group();
+        for (const [geo, m] of NOSE) cab.add(new THREE.Mesh(geo, m));
+        cab.add(placed(c.swoosh, red, -3.5, 0, 1.15)); // red maple-leaf swoosh behind the cab
+        cab.position.x = end * cl / 2;
+        cab.rotation.z = end > 0 ? 0 : Math.PI;
+        g.add(cab);
+      }
+      if (i < cars - 1) part(-len / 2 + (i + 1) * (cl + gap) - gap / 2).add(placed(c.bellows, glass, 0, 0, (TOP + BASE) / 2)); // joint
     }
-    for (const end of [1, -1]) { // a cab at both ends, like the real (double-ended) train
-      const cab = new THREE.Group();
-      for (const [geo, m] of NOSE) cab.add(new THREE.Mesh(geo, m));
-      cab.add(placed(c.swoosh, red, -3.5, 0, 1.15)); // red maple-leaf swoosh behind the cab
-      cab.position.x = end * len / 2;
-      cab.rotation.z = end > 0 ? 0 : Math.PI;
-      g.add(cab);
-    }
-    g.add(placed(c.panto, grey, -len / 6, 0, TOP + 0.2)); // pantograph
-    return g;
+    return { root, parts };
   }
   let renderer;
   return {
@@ -466,19 +473,23 @@ async function trainLayer() {
       camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix)
         .multiply(new THREE.Matrix4().makeTranslation(o.x, o.y, 0).scale(new THREE.Vector3(u, -u, u)));
       const mpp = 40075016 * Math.cos(45.4 * Math.PI / 180) / (512 * 2 ** map.getZoom()); // metres per pixel
+      // Like the 2D sprites: at least ~55 px long. Real trains are 37x longer than wide, so also fatten the
+      // cross-section (3x when zoomed out, true proportions from zoom 17) or they read as a thin line.
+      const fat = Math.min(3, Math.max(1, 18 - map.getZoom()));
       for (const [k, tr] of trains) {
-        if (!tr.here) continue;
-        let g = groups.get(k);
-        if (!g) { g = model(tr.l); scene.add(g); groups.set(k, g); }
-        const m = maplibregl.MercatorCoordinate.fromLngLat(tr.here);
-        g.position.set((m.x - o.x) / u, -(m.y - o.y) / u, 0);
-        g.rotation.z = tr.theta || 0;
-        // Like the 2D sprites: at least ~55 px long. Real trains are 37x longer than wide, so also fatten the
-        // cross-section (3x when zoomed out, true proportions from zoom 17) or they read as a thin line.
-        const sc = Math.max(1, 55 * mpp / LEN[tr.l.name]), fat = Math.min(3, Math.max(1, 18 - map.getZoom()));
-        g.scale.set(sc, sc * fat, sc * fat);
+        if (tr.d == null) continue;
+        let t3 = groups.get(k);
+        if (!t3) { t3 = model(tr.l); scene.add(t3.root); groups.set(k, t3); }
+        const sc = Math.max(1, 55 * mpp / LEN[tr.l.name]);
+        for (const { g, x } of t3.parts) { // each car sits on the track at its own spot, facing along it
+          const dd = tr.d + tr.sign * x * sc, p = pointAt(tr.l, dd), a = pointAt(tr.l, dd + tr.sign * 3), b = pointAt(tr.l, dd - tr.sign * 3);
+          const m = maplibregl.MercatorCoordinate.fromLngLat(p);
+          g.position.set((m.x - o.x) / u, -(m.y - o.y) / u, 0);
+          g.rotation.z = Math.atan2((a[1] - b[1]) * KY, (a[0] - b[0]) * KX);
+          g.scale.set(sc, sc * fat, sc * fat);
+        }
       }
-      for (const [k, g] of groups) if (!trains.has(k)) { scene.remove(g); groups.delete(k); }
+      for (const [k, t3] of groups) if (!trains.has(k)) { scene.remove(t3.root); groups.delete(k); }
       renderer.resetState();
       renderer.render(scene, camera);
     },
