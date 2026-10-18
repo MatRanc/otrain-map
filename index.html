@@ -239,7 +239,7 @@ function locate(row, t) {
   if (t < at(0, 1) - 60 || t > at(n - 1, 2) + 30) return null; // appear a minute early at the terminus, linger 30 s
   for (let i = 0; i < n; i++) {
     const arr = at(i, 1), dep = at(i, 2) + DWELL_S;
-    if (t <= dep || i === n - 1) return { l, d: l.sd[at(i, 0)], i, stopped: true, next: i, sign: i < n - 1 && l.sd[at(i + 1, 0)] < l.sd[at(i, 0)] ? -1 : 1, eta: arr };
+    if (t <= dep || i === n - 1) return { l, d: l.sd[at(i, 0)], i, stopped: true, next: i, sign: i < n - 1 && l.sd[at(i + 1, 0)] < l.sd[at(i, 0)] ? -1 : 1, eta: i < n - 1 ? at(i, 2) : arr }; // at a station: its departure time
     const nArr = at(i + 1, 1);
     if (t < nArr) {
       const a = l.sd[at(i, 0)], b = l.sd[at(i + 1, 0)], f = (t - dep) / Math.max(1, nArr - dep);
@@ -332,7 +332,7 @@ function frame() {
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
     if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
     const stn = pos.l.stations[row[3 + pos.next * 3]].name;
-    tr.info = `<b>Line ${pos.l.name}</b> → ${pos.l.headsigns[row[1]]}<br>${pos.stopped ? `At ${stn}` : `Next: ${stn} · ${hhmm(pos.eta)}`}<br><small>Scheduled</small>`;
+    tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   });
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
   for (const b of buses.values()) { // glide to each new GPS fix instead of jumping
