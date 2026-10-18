@@ -42,6 +42,8 @@
   /* --len is set from the zoom level. */
   .train { width: var(--len, 34px); aspect-ratio: 100 / 24; filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.45)); cursor: pointer; }
   .train svg { display: block; width: 100%; height: 100%; }
+  .three .train svg { opacity: 0; } /* 3D models draw the train; the flat marker stays as the tap target */
+  .three .train { filter: none; }
   .alert { margin-top: 8px; padding-left: 8px; border-left: 3px solid var(--c); font-size: 13px; max-width: 260px; }
   .alert a { color: inherit; font-weight: 600; }
   .bus { padding: 1px 5px; border-radius: 4px; background: var(--c); color: #fff; font-size: 11px; font-weight: 700;
@@ -101,6 +103,7 @@ map.addControl({
       </button>
       <div class="layers-panel" hidden>
         <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
+        <label class="toggle"><input type="checkbox" id="three"> 3D view</label>
       </div>`);
     const btn = el.querySelector("button"), panel = el.querySelector(".layers-panel");
     const show = (on) => { panel.hidden = !on; btn.setAttribute("aria-expanded", on); };
@@ -132,6 +135,38 @@ const applySat = pref("sat", false, (on) => {
   for (const l of map.getStyle().layers) if (l.id === "sat" || l.type === "fill-extrusion")
     map.setLayoutProperty(l.id, "visibility", (l.id === "sat") === on ? "visible" : "none");
 });
+// Whole network in view; in 3D rotated and tilted. cameraForBounds can't account for tilt, so measure where the
+// lines land on screen and correct zoom + centre (damped passes, all before the next paint), then ease there.
+let homeBounds, homePts, touched = false;
+function homeView(duration = 0) {
+  const on = document.body.classList.contains("three"), bearing = on ? -17 : 0, pitch = on ? 60 : 0;
+  const pad = phone.matches ? { top: card.offsetHeight + 20, bottom: 20, left: 20, right: 56 } // clear the card and controls
+    : { top: 60, bottom: 30, left: 30, right: 30 };
+  const { clientWidth: W, clientHeight: H } = map.getContainer(), aw = W - pad.left - pad.right, ah = H - pad.top - pad.bottom;
+  const cam = map.cameraForBounds(homeBounds, { bearing, padding: pad });
+  if (!cam || aw <= 0 || ah <= 0) return;
+  const start = { center: map.getCenter(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch() };
+  let { center, zoom } = cam;
+  for (let i = 0; i < 8; i++) {
+    map.jumpTo({ center, zoom, bearing, pitch });
+    const ps = homePts.map((p) => map.project(p)), xs = ps.map((p) => p.x), ys = ps.map((p) => p.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    center = map.unproject([W / 2 + (x0 + x1) / 2 - (pad.left + aw / 2), H / 2 + (y0 + y1) / 2 - (pad.top + ah / 2)]);
+    zoom += 0.6 * Math.log2(Math.min(aw / (x1 - x0), ah / (y1 - y0))); // damped: under tilt the fit isn't linear in zoom
+  }
+  map.jumpTo(start);
+  map.easeTo({ center, zoom, bearing, pitch, duration });
+}
+
+// 3D view: tilt the camera and draw trains as three.js models (three.js loads the first time it's switched on).
+const applyThree = pref("three", false, async (on) => {
+  document.body.classList.toggle("three", on);
+  if (!LINES) return; // runs again once the map and lines are ready
+  if (touched) map.easeTo({ pitch: on ? 60 : 0, bearing: on ? -17 : 0, duration: 900 }); // keep the viewer's spot
+  else homeView(900);
+  if (on && !map.getLayer("trains-3d")) map.addLayer(await trainLayer());
+});
+
 
 Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
   // The style draws flat buildings only at zoom 13–14, then 3D from 14: drop the flat band and start 3D at 13.
@@ -175,15 +210,13 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   }
   const b = new maplibregl.LngLatBounds();
   lines.forEach((l) => l.shape.forEach((p) => b.extend(ll(p))));
-  const fit = () => map.fitBounds(b, { animate: false, padding: phone.matches
-    ? { top: card.offsetHeight + 20, bottom: 20, left: 20, right: 56 } // clear the collapsed card and the controls
-    : { top: 60, bottom: 30, left: 30, right: 30 } });
-  fit();
+  homeBounds = b;
+  homePts = lines.flatMap((l) => l.shape.filter((_, i) => i % 4 === 0).concat([l.shape.at(-1)]).map(ll));
+  homeView();
   // A tab opened in the background has no size yet, so the first fit is wrong: refit on resize until the viewer moves the map.
-  let touched = false;
   map.on("movestart", (e) => { if (e.originalEvent) touched = true; });
-  map.on("resize", () => { if (!touched) fit(); });
-  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); poll(); });
+  map.on("resize", () => { if (!touched) homeView(); });
+  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); poll(); applyThree(); });
 });
 
 // Track geometry: flat-earth metres are plenty at city scale.
@@ -343,7 +376,8 @@ function frame() {
     tr.marker.setLngLat(here);
     // Sprite points east; marker rotation is clockwise from north.
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
-    if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
+    if (dx || dy) { tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90); tr.theta = Math.atan2(dy, dx); }
+    Object.assign(tr, { l: pos.l, here });
     const stn = pos.l.stations[row[4 + pos.next * 3]].name;
     tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
@@ -356,7 +390,99 @@ function frame() {
   const downLines = LINES.filter((l) => down[l.route_id]).map((l) => `Line ${l.name}`);
   status.textContent = stale ? "Timetable out of date: rerun build_lines.py" : (seen.size ? `${seen.size} train${seen.size === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now")
     + (downLines.length ? ` · replacement buses on ${downLines.join(", ")}` : "");
+  if (document.body.classList.contains("three")) map.triggerRepaint(); // the 3D layer redraws trains every frame
   requestAnimationFrame(frame);
+}
+
+// three.js custom layer: one low-poly train per physical train, in metres around the map centre (keeps float32 precise).
+async function trainLayer() {
+  const THREE = await import("https://unpkg.com/three@0.160.0/build/three.module.js");
+  const scene = new THREE.Scene(), camera = new THREE.Camera(), groups = new Map();
+  scene.add(new THREE.AmbientLight(0xffffff, 1.8));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  sun.position.set(-0.6, -1, 2); // from the south-west, above
+  scene.add(sun);
+  const mat = (c) => new THREE.MeshLambertMaterial({ color: c, side: THREE.DoubleSide }); // DoubleSide: the y-flip mirrors faces
+  const white = mat(0xf2f2f2), glass = mat(0x1d232b), red = mat(0xd30f1d), grey = mat(0x8a9096);
+  const LEN = { 1: 98, 2: 81, 4: 81 }; // metres: Line 1 Citadis Spirit pair, Line 2/4 Stadler FLIRT
+  // Model axes: x = forward, y = left, z = up. Geometry is built once per line and shared by every train.
+  const W = 2.65, BASE = 0.5, TOP = 3.5; // metres: car width, floor and roof height
+  const placed = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); return o; };
+  const box = (lx, ly, lz) => new THREE.BoxGeometry(lx, ly, lz);
+  // Car body: rounded-rectangle cross-section (rounded roof edges, like the Citadis) extruded along x.
+  function bodyGeo(len) {
+    const r = 0.55, h = TOP - BASE, sh = new THREE.Shape();
+    sh.moveTo(-W / 2, 0); sh.lineTo(W / 2, 0); sh.lineTo(W / 2, h - r); sh.quadraticCurveTo(W / 2, h, W / 2 - r, h);
+    sh.lineTo(-W / 2 + r, h); sh.quadraticCurveTo(-W / 2, h, -W / 2, h - r); sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: len, bevelEnabled: false, curveSegments: 4 });
+    return g.applyMatrix4(new THREE.Matrix4().set(0, 0, 1, -len / 2, 1, 0, 0, 0, 0, 1, 0, BASE, 0, 0, 0, 1)); // (x,y,z) -> (z, x, y)
+  }
+  // Cab nose, side profile (x forward from the body end, z up): curved and sloped, split into bands like the real
+  // livery: red lower nose, black wraparound windshield, white roof cap. Extruded across the width with rounded edges.
+  const FRONT = [[2.25, 0.5], [2.55, 0.85], [2.7, 1.4], [2.6, 2.1], [2.25, 2.8], [1.5, 3.3], [0, 3.5]]; // [x, z]
+  const frontX = (z) => { for (let i = 1; i < FRONT.length; i++) { const [x0, z0] = FRONT[i - 1], [x1, z1] = FRONT[i];
+    if (z <= z1) return x0 + (x1 - x0) * (z - z0) / (z1 - z0); } return 0; };
+  function noseBand(z0, z1) {
+    const bev = 0.3, sh = new THREE.Shape(), pts = FRONT.filter(([, z]) => z > z0 && z < z1);
+    sh.moveTo(-0.5, z0); sh.lineTo(frontX(z0) - bev, z0);
+    for (const [x, z] of pts) sh.lineTo(x - bev, z);
+    sh.lineTo(Math.max(0, frontX(z1) - bev), z1); sh.lineTo(-0.5, z1); sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: W - 2 * bev, bevelEnabled: true, bevelSize: bev, bevelThickness: bev, bevelSegments: 3, curveSegments: 6 });
+    return g.applyMatrix4(new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, -1, (W - 2 * bev) / 2, 0, 1, 0, 0, 0, 0, 0, 1)); // (x,y,z) -> (x, -z, y), centred
+  }
+  // The rounded bevel grows each band by 0.3 m, so the outer bands stop 0.3 m short to sit flush with floor and roof.
+  const NOSE = [[noseBand(0.8, 1.45), red], [noseBand(1.45, 2.95), glass], [noseBand(2.95, 3.2), white]];
+  const cache = {};
+  function model(l) {
+    const len = LEN[l.name], cars = 4, gap = 0.8, cl = (len - gap * (cars - 1)) / cars;
+    const c = (cache[l.name] ||= { body: bodyGeo(cl), win: box(cl - 2, W + 0.06, 0.95), stripe: box(cl, W + 0.04, 0.28), swoosh: box(7, W + 0.05, 1.1),
+      bellows: box(gap + 0.2, W - 0.3, TOP - BASE - 0.3), panto: box(5, 1.2, 0.4), line: mat(l.color) });
+    const g = new THREE.Group();
+    for (let i = 0; i < cars; i++) {
+      const x = -len / 2 + cl / 2 + i * (cl + gap);
+      g.add(placed(c.body, white, x, 0, 0));
+      g.add(placed(c.win, glass, x, 0, 2.55)); // window band
+      g.add(placed(c.stripe, c.line, x, 0, 1.3)); // line-colour stripe
+      if (i < cars - 1) g.add(placed(c.bellows, glass, x + cl / 2 + gap / 2, 0, (TOP + BASE) / 2)); // articulation
+    }
+    for (const end of [1, -1]) { // a cab at both ends, like the real (double-ended) train
+      const cab = new THREE.Group();
+      for (const [geo, m] of NOSE) cab.add(new THREE.Mesh(geo, m));
+      cab.add(placed(c.swoosh, red, -3.5, 0, 1.15)); // red maple-leaf swoosh behind the cab
+      cab.position.x = end * len / 2;
+      cab.rotation.z = end > 0 ? 0 : Math.PI;
+      g.add(cab);
+    }
+    g.add(placed(c.panto, grey, -len / 6, 0, TOP + 0.2)); // pantograph
+    return g;
+  }
+  let renderer;
+  return {
+    id: "trains-3d", type: "custom", renderingMode: "3d",
+    onAdd(_, gl) { renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true }); renderer.autoClear = false; },
+    render(gl, matrix) {
+      if (!document.body.classList.contains("three")) return;
+      const o = maplibregl.MercatorCoordinate.fromLngLat(map.getCenter()), u = o.meterInMercatorCoordinateUnits();
+      camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix)
+        .multiply(new THREE.Matrix4().makeTranslation(o.x, o.y, 0).scale(new THREE.Vector3(u, -u, u)));
+      const mpp = 40075016 * Math.cos(45.4 * Math.PI / 180) / (512 * 2 ** map.getZoom()); // metres per pixel
+      for (const [k, tr] of trains) {
+        if (!tr.here) continue;
+        let g = groups.get(k);
+        if (!g) { g = model(tr.l); scene.add(g); groups.set(k, g); }
+        const m = maplibregl.MercatorCoordinate.fromLngLat(tr.here);
+        g.position.set((m.x - o.x) / u, -(m.y - o.y) / u, 0);
+        g.rotation.z = tr.theta || 0;
+        // Like the 2D sprites: at least ~55 px long. Real trains are 37x longer than wide, so also fatten the
+        // cross-section (3x when zoomed out, true proportions from zoom 17) or they read as a thin line.
+        const sc = Math.max(1, 55 * mpp / LEN[tr.l.name]), fat = Math.min(3, Math.max(1, 18 - map.getZoom()));
+        g.scale.set(sc, sc * fat, sc * fat);
+      }
+      for (const [k, g] of groups) if (!trains.has(k)) { scene.remove(g); groups.delete(k); }
+      renderer.resetState();
+      renderer.render(scene, camera);
+    },
+  };
 }
 </script>
 </body>
