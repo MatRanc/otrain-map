@@ -84,7 +84,8 @@ sizeTrains();
 
 
 // One shared popup: hover shows it; clicking a train pins it (it follows the train) until you click elsewhere.
-const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+// subpixelPositioning: a pinned popup glides with its train instead of stepping a whole pixel at a time.
+const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12, subpixelPositioning: true });
 let pinned = null; // train id whose popup is pinned
 const hover = (el, getLngLat, getHtml) => {
   el.addEventListener("mouseenter", () => { if (pinned == null) popup.setLngLat(getLngLat()).setHTML(getHtml()).addTo(map); });
