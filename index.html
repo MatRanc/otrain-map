@@ -126,7 +126,12 @@ const pref = (id, def, apply) => {
   return go;
 };
 pref("models", true, (on) => document.body.classList.toggle("dots", !on))();
-const applySat = pref("sat", false, (on) => map.getLayer("sat") && map.setLayoutProperty("sat", "visibility", on ? "visible" : "none"));
+const applySat = pref("sat", false, (on) => {
+  if (!map.getLayer("sat")) return;
+  // Satellite imagery already shows the buildings, so drop the basemap's 3D extrusions while it's on.
+  for (const l of map.getStyle().layers) if (l.id === "sat" || l.type === "fill-extrusion")
+    map.setLayoutProperty(l.id, "visibility", (l.id === "sat") === on ? "visible" : "none");
+});
 
 Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
   // Satellite sits above the basemap's fills/roads but under its labels, so place names stay readable.
