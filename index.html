@@ -126,7 +126,12 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   }
   const b = new maplibregl.LngLatBounds();
   lines.forEach((l) => l.shape.forEach((p) => b.extend(ll(p))));
-  map.fitBounds(b, { padding: { top: 60, bottom: 30, left: 30, right: 30 }, animate: false });
+  const fit = () => map.fitBounds(b, { padding: { top: 60, bottom: 30, left: 30, right: 30 }, animate: false });
+  fit();
+  // A tab opened in the background has no size yet, so the first fit is wrong: refit on resize until the viewer moves the map.
+  let touched = false;
+  map.on("movestart", (e) => { if (e.originalEvent) touched = true; });
+  map.on("resize", () => { if (!touched) fit(); });
   return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); poll(); });
 });
 
