@@ -57,6 +57,26 @@ def snap(lat, lon, shape):
         if e < best[0]: best = (e, a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
     return round(best[1], 6), round(best[2], 6)
 
+# GTFS shapes jog sideways by a few metres here and there (visible kinks, trains wobble through them).
+# Resample every 5 m, average each point over +-40 m, keep one point per 10 m. Shifts real curves (R >= 200 m) < 1 m.
+def smooth(shape, step=5, half=8):
+    xy = [(lo * K, la * 110540) for la, lo in shape]
+    out, carry = [xy[0]], 0.0
+    for (ax, ay), (bx, by) in zip(xy, xy[1:]):
+        seg = math.hypot(bx - ax, by - ay)
+        t = step - carry
+        while t <= seg:
+            out.append((ax + (bx - ax) * t / seg, ay + (by - ay) * t / seg)); t += step
+        carry = seg - (t - step)
+    out.append(xy[-1])
+    avg = []
+    for i in range(len(out)):
+        w = min(half, i, len(out) - 1 - i)  # shrink the window at the ends so the termini stay put
+        pts = out[i - w:i + w + 1]
+        avg.append((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)))
+    keep = avg[::2] + ([avg[-1]] if (len(avg) - 1) % 2 else [])
+    return [[round(y / 110540, 6), round(x / K, 6)] for x, y in keep]
+
 def placed(st, shape):
     lat, lon = osm.get(norm(st["name"]), (st["lat"], st["lon"]))
     if norm(st["name"]) not in osm: print("  no OSM match, using GTFS coords:", st["name"])
@@ -67,11 +87,12 @@ out = []
 for rid in sorted(routes, key=lambda r: int(routes[r]["route_sort_order"])):
     r, t0 = routes[rid], best[(rid, "0")][1]
     dirs = [best[(rid, d)][1] for d in "01" if (rid, d) in best]
+    line_shape = smooth([[la, lo] for _, la, lo in sorted(shapes[t0["shape_id"]])])
     out.append({
         "route_id": rid, "name": r["route_short_name"], "long_name": r["route_long_name"], "color": "#" + r["route_color"],
         "headsigns": {t["direction_id"]: t["trip_headsign"] for t in dirs},
-        "shape": [[la, lo] for _, la, lo in sorted(shapes[t0["shape_id"]])],
-        "stations": [placed(station(sid), [[la, lo] for _, la, lo in sorted(shapes[t0["shape_id"]])]) for _, sid in sorted(seq[t0["trip_id"]])],
+        "shape": line_shape,
+        "stations": [placed(station(sid), line_shape) for _, sid in sorted(seq[t0["trip_id"]])],
         "stop_names": {sid: station(sid)["name"] for t in dirs for _, sid in seq[t["trip_id"]]},
     })
 here = os.path.dirname(os.path.abspath(__file__))
