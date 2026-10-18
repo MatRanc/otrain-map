@@ -1,8 +1,9 @@
 # O-Train Live
 
-Live map of OC Transpo O-Train Lines 1, 2 and 4. Static site (GitHub Pages → otrain.matranc.com) + a tiny Cloudflare Worker that proxies the GTFS-RT feed.
+Animated map of OC Transpo O-Train Lines 1, 2 and 4 at otrain.matranc.com. Static site on GitHub Pages plus a tiny Cloudflare Worker.
 
-Why the Worker: OC Transpo's feed only allows CORS from its own developer portal, and the API key shouldn't ship to browsers. The Worker holds the key, edge-caches 15s, and returns O-Train vehicles as JSON.
+- **Trains** follow the published timetable (`schedule.json`, built from OC Transpo's static GTFS). OC Transpo's GTFS-RT feeds carry buses only, with no O-Train positions.
+- **Live disruptions** come through the Worker: R1/R2/R4 replacement buses in the GTFS-RT vehicle feed grey out the section they cover, and O-Train items from the service-updates RSS show as alerts. The Worker holds the API key and adds CORS, since the feed only allows OC Transpo's own portal.
 
 ## Setup
 1. Get a key at https://nextrip-public-api.developer.azure-api.net/ (subscribe to GTFS-RT).
