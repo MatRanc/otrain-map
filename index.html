@@ -27,6 +27,10 @@
   .dots .train { width: 16px; aspect-ratio: 1; border-radius: 50%; background: var(--c); border: 3px solid #fff;
     box-sizing: border-box; filter: none; box-shadow: 0 0 0 1.5px #222, 0 2px 5px rgba(0,0,0,.4); }
   .dots .train svg { display: none; }
+  .alert { margin-top: 8px; padding-left: 8px; border-left: 3px solid var(--c); font-size: 13px; max-width: 260px; }
+  .alert a { color: inherit; font-weight: 600; }
+  .bus { padding: 1px 5px; border-radius: 4px; background: var(--c); color: #fff; font-size: 11px; font-weight: 700;
+    border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.45); cursor: pointer; }
   .maplibregl-popup { font-family: inherit; font-size: 13px; pointer-events: none; }
   .maplibregl-popup-content { padding: 6px 10px; }
 </style>
@@ -40,11 +44,16 @@
   <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
   <div class="status" id="status" role="status">Loading…</div>
   <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
+  <div id="alerts"></div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
 // OC Transpo's GTFS-RT feeds (see worker.js) carry buses only, no O-Train, so trains follow the published timetable.
 const DWELL_S = 12; // GTFS lists arrival == departure; hold trains this long so they visibly stop
+// What *is* live: R1/R2/R4 replacement buses (= that stretch of line is down) and O-Train RSS alerts, via the Worker.
+// ?feed=<url> overrides it for testing.
+const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.otrain-map.workers.dev";
+const POLL_MS = 60000;
 let sched, LINES;
 
 const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty",
@@ -92,6 +101,10 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
       paint: { "line-color": "#fff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 7, 16, 14] } });
     map.addLayer({ id: l.route_id, type: "line", source: l.route_id, layout: { "line-join": "round", "line-cap": "round" },
       paint: { "line-color": l.color, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 4, 16, 9] } });
+    // Section replaced by buses: grey dashes over the line, empty until poll() finds R-buses.
+    map.addSource(l.route_id + "-down", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    map.addLayer({ id: l.route_id + "-down", type: "line", source: l.route_id + "-down", layout: { "line-join": "round" },
+      paint: { "line-color": "#6b7075", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 4, 16, 9], "line-dasharray": [1.5, 1] } });
     document.getElementById("legend").insertAdjacentHTML("beforeend",
       `<span><span class="badge" style="background:${l.color}">${l.name}</span>Line ${l.name}</span>`);
   }
@@ -114,7 +127,7 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   const b = new maplibregl.LngLatBounds();
   lines.forEach((l) => l.shape.forEach((p) => b.extend(ll(p))));
   map.fitBounds(b, { padding: { top: 60, bottom: 30, left: 30, right: 30 }, animate: false });
-  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); });
+  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); poll(); });
 });
 
 // Track geometry: flat-earth metres are plenty at city scale.
@@ -188,19 +201,72 @@ function locate(row, t) {
   return null;
 }
 
+const down = {}; // route_id -> [from, to] metres along the line where R-buses are replacing trains
+const buses = new Map(); // vehicle id -> { marker, at: [lon, lat], to: [lon, lat] }
+async function poll() {
+  try {
+    const r = await fetch(FEED, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const { vehicles, alerts } = await r.json();
+    document.getElementById("alerts").innerHTML = alerts.map((a) => {
+      const l = LINES.find((x) => a.lines.includes(x.name)) || LINES[0];
+      const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+      return `<div class="alert" style="--c:${l.color}"><a href="${esc(a.link)}" target="_blank" rel="noopener">${esc(a.title)}</a></div>`;
+    }).join("");
+    const spans = {}, ids = new Set();
+    for (const v of vehicles.filter((v) => /^R[124]$/.test(v.route_id))) {
+      const l = LINES.find((x) => x.name === v.route_id[1]);
+      if (!l) continue;
+      ids.add(v.id);
+      let b = buses.get(v.id);
+      if (!b) {
+        const el = div("bus", v.route_id);
+        el.style.setProperty("--c", l.color);
+        b = { at: [v.lon, v.lat], marker: new maplibregl.Marker({ element: el, subpixelPositioning: true }).setLngLat([v.lon, v.lat]).addTo(map) };
+        hover(el, () => b.marker.getLngLat(), () => `<b>${v.route_id}</b> replacement bus<br>Trains not running here`);
+        buses.set(v.id, b);
+      }
+      b.to = [v.lon, v.lat];
+      // Buses follow roads near the line; only count ones within 1.5 km of it.
+      const d = project(l, v.lat, v.lon), [x, y] = pointAt(l, d);
+      if (Math.hypot((x - v.lon) * KX, (y - v.lat) * KY) > 1500) continue;
+      const sp = (spans[l.route_id] ||= [d, d]);
+      sp[0] = Math.min(sp[0], d); sp[1] = Math.max(sp[1], d);
+    }
+    for (const [id, b] of buses) if (!ids.has(id)) { b.marker.remove(); buses.delete(id); }
+    for (const l of LINES) {
+      const sp = spans[l.route_id];
+      // ponytail: section = stations just outside the buses' spread; a single bus only marks the stretch around it.
+      down[l.route_id] = sp && [Math.max(0, ...l.sd.filter((x) => x <= sp[0])), Math.min(l.length, ...l.sd.filter((x) => x >= sp[1]))];
+      map.getSource(l.route_id + "-down").setData(down[l.route_id]
+        ? { type: "Feature", geometry: { type: "LineString", coordinates: slice(l, ...down[l.route_id]) } }
+        : { type: "FeatureCollection", features: [] });
+    }
+  } catch (e) {
+    console.warn("[otrain] live check failed:", e.message); // timetable keeps running without it
+  }
+  setTimeout(poll, POLL_MS);
+}
+function slice(l, a, b) { // line coordinates between two distances
+  return [pointAt(l, a), ...l.shape.filter((_, i) => l.cum[i] > a && l.cum[i] < b).map(ll), pointAt(l, b)];
+}
+
 const hhmm = (s) => `${Math.floor(s / 3600) % 24}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`;
-let lastScan = 0, today, yesterday;
+let lastScan = 0, today, yesterday, stale;
 function frame() {
   const nowMs = Date.now(), now = ottawa(nowMs);
   if (nowMs - lastScan > 60000) { // service calendars only change at midnight
     lastScan = nowMs;
     today = running(now);
     yesterday = running(ottawa(nowMs - 86400000)); // after-midnight trips belong to yesterday's service (times > 24:00)
+    stale = Object.values(sched.services).every((c) => c.end < now.date && !c.add.some((d) => d >= now.date));
   }
   const t = now.sec + (nowMs % 1000) / 1000, seen = new Set();
   sched.trips.forEach((row, k) => {
     const pos = (today.has(row[2]) && locate(row, t)) || (yesterday.has(row[2]) && locate(row, t + 86400));
     if (!pos) return;
+    const dn = down[pos.l.route_id];
+    if (dn && pos.d >= dn[0] - 50 && pos.d <= dn[1] + 50) return; // buses replacing trains here
     seen.add(k);
     let tr = trains.get(k);
     if (!tr) {
@@ -221,8 +287,14 @@ function frame() {
     tr.info = `<b>Line ${pos.l.name}</b> → ${pos.l.headsigns[row[1]]}<br>${pos.stopped ? `At ${stn}` : `Next: ${stn} · ${hhmm(pos.eta)}`}<br><small>Scheduled</small>`;
   });
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
+  for (const b of buses.values()) { // glide to each new GPS fix instead of jumping
+    b.at = b.at.map((x, i) => x + (b.to[i] - x) * 0.02);
+    b.marker.setLngLat(b.at);
+  }
   const status = document.getElementById("status");
-  status.textContent = seen.size ? `${seen.size} train${seen.size === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now";
+  const downLines = LINES.filter((l) => down[l.route_id]).map((l) => `Line ${l.name}`);
+  status.textContent = stale ? "Timetable out of date: rerun build_lines.py" : (seen.size ? `${seen.size} train${seen.size === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now")
+    + (downLines.length ? ` · replacement buses on ${downLines.join(", ")}` : "");
   requestAnimationFrame(frame);
 }
 </script>

@@ -21,3 +21,17 @@ assert.equal(t.trip_id, "trip9"); assert.equal(t.direction_id, 1); assert.equal(
 assert.equal(t.id, "1105"); assert.equal(t.label, "Train 5"); assert.equal(t.stop_id, "CD995");
 assert.ok(Math.abs(t.lat - 45.4) < 1e-5 && t.bearing === 90 && t.timestamp === 1760000000);
 console.log("ok");
+
+// RSS alert filter
+import { parseAlerts } from "./worker.js";
+const rss = `<rss><channel>
+<item><title>Detour: Route 53</title><category>affectedRoutes-53, 14</category><category>Detours</category><category>affectedRoutes-53</category><description>Bus detour</description><link>https://x/1</link></item>
+<item><title>Line 1: R1 buses between Tunney&#039;s and Blair</title><category>General Message</category><description><![CDATA[<p>Trains are not running &amp; R1 buses replace them.</p>]]></description><link>https://x/2</link></item>
+<item><title>Weekend closure &#128679;</title><category>Important Service Notification</category><category><![CDATA[affectedRoutes-2 O-Train, 4 O-Train, 57]]></category><description>Trillium closure</description><link>https://x/3</link></item>
+</channel></rss>`;
+const al = parseAlerts(rss);
+assert.deepEqual(al.map((a) => a.lines), [["1"], ["2", "4"]]);
+assert.equal(al[0].title, "Line 1: R1 buses between Tunney's and Blair");
+assert.equal(al[0].text, "Trains are not running & R1 buses replace them.");
+assert.equal(al[1].title, "Weekend closure 🚧");
+console.log("alerts ok");
