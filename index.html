@@ -15,7 +15,7 @@
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; font-weight: 600; }
   .legend > span { display: flex; align-items: center; gap: 5px; }
   .status { margin-top: 8px; font-size: 12px; color: #555; }
-  .status.err { color: #b0101d; }
+  .note { margin-top: 4px; font-size: 11px; color: #777; max-width: 240px; }
   .toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; cursor: pointer; }
   .badge { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 16px;
     display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); box-sizing: border-box; }
@@ -39,15 +39,13 @@
   <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
   <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
   <div class="status" id="status" role="status">Loading…</div>
+  <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
-// Worker URL (see README). ?feed=<url> overrides it for testing.
-const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.otrain-map.workers.dev";
-const POLL_MS = 15000, STALE_S = 300;
-// ponytail: trains glide along the track between ~30s GPS fixes by dead reckoning at a typical speed.
-// Looks alive, not exact. Per-segment speeds from the schedule would be the upgrade if accuracy matters.
-const CRUISE = 11, DWELL_S = 20, MAX_EXTRAP_S = 120; // m/s (~40 km/h avg), station stop, give-up horizon
+// OC Transpo's GTFS-RT feeds (see worker.js) carry buses only, no O-Train, so trains follow the published timetable.
+const DWELL_S = 12; // GTFS lists arrival == departure; hold trains this long so they visibly stop
+let sched, LINES;
 
 const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty",
   center: [-75.69, 45.37], zoom: 10.5, attributionControl: false });
@@ -77,7 +75,6 @@ const hover = (el, getLngLat, getHtml) => {
   el.addEventListener("mouseleave", () => popup.remove());
 };
 
-const byRoute = {};
 const div = (cls, html = "") => Object.assign(document.createElement("div"), { className: cls, innerHTML: html });
 const ll = ([la, lo]) => [lo, la];
 
@@ -89,7 +86,6 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
     map.getStyle().layers.find((x) => x.type === "symbol")?.id);
   applySat();
   for (const l of lines) {
-    byRoute[l.route_id] = l;
     measure(l);
     map.addSource(l.route_id, { type: "geojson", data: { type: "Feature", geometry: { type: "LineString", coordinates: l.shape.map(ll) } } });
     map.addLayer({ id: l.route_id + "-casing", type: "line", source: l.route_id, layout: { "line-join": "round", "line-cap": "round" },
@@ -99,7 +95,7 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
     document.getElementById("legend").insertAdjacentHTML("beforeend",
       `<span><span class="badge" style="background:${l.color}">${l.name}</span>Line ${l.name}</span>`);
   }
-  for (const l of lines) l.stationD = l.stations.map((s) => project(l, s.lat, s.lon)).sort((a, b) => a - b);
+  for (const l of lines) l.sd = l.stations.map((s) => project(l, s.lat, s.lon)); // station distance along the line
   const seen = new Set();
   for (const l of lines) {
     for (const s of l.stations) {
@@ -118,8 +114,7 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   const b = new maplibregl.LngLatBounds();
   lines.forEach((l) => l.shape.forEach((p) => b.extend(ll(p))));
   map.fitBounds(b, { padding: { top: 60, bottom: 30, left: 30, right: 30 }, animate: false });
-  poll();
-  requestAnimationFrame(frame);
+  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); });
 });
 
 // Track geometry: flat-earth metres are plenty at city scale.
@@ -159,75 +154,75 @@ const trainSvg = (c) => `<svg viewBox="0 0 100 24" aria-hidden="true">
   <rect x="35" y="6" width="8" height="3" rx="1" fill="#9aa0a6"/><rect x="2.2" y="7" width="1.6" height="10" rx=".8" fill="#d30f1d"/>
 </svg>`;
 
-const trains = new Map(); // vehicle id -> { l, marker, d (shown), d0 (fix), t0, sign, speed, dwell, info }
+const trains = new Map(); // trip index -> { marker, info }
 
-async function poll() {
-  const status = document.getElementById("status");
-  try {
-    const r = await fetch(FEED, { cache: "no-store" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const { vehicles } = await r.json();
-    const now = Date.now() / 1000;
-    const live = vehicles.filter((v) => byRoute[v.route_id] && (!v.timestamp || now - v.timestamp < STALE_S));
-    const ids = new Set();
-    for (const v of live) {
-      const l = byRoute[v.route_id], id = v.id || v.trip_id;
-      ids.add(id);
-      const d0 = project(l, v.lat, v.lon);
-      let tr = trains.get(id);
-      if (!tr || tr.l !== l) {
-        if (tr) tr.marker.remove();
-        const el = div("train", trainSvg(l.color));
-        el.style.setProperty("--c", l.color);
-        el.title = `Line ${l.name} train`;
-        // subpixelPositioning: no 1px stepping when a train crawls across the screen at city zoom.
-        tr = { l, d: d0, marker: new maplibregl.Marker({ element: el, rotationAlignment: "map", pitchAlignment: "map", subpixelPositioning: true })
-          .setLngLat(pointAt(l, d0)).addTo(map) };
-        const t = tr;
-        hover(el, () => t.marker.getLngLat(), () => t.info);
-        trains.set(id, tr);
-      }
-      // Shape follows direction 0, so direction 0 runs toward increasing distance.
-      if (v.timestamp || tr.d0 !== d0) tr.t0 = v.timestamp || now; // feeds without timestamps: restart only on a new fix
-      Object.assign(tr, { d0, sign: v.direction_id === 1 ? -1 : 1,
-        speed: v.speed > 1 ? v.speed : CRUISE, dwell: v.status === "STOPPED_AT" ? DWELL_S : 0 });
-      const to = l.headsigns[v.direction_id] || "";
-      const stop = l.stop_names[v.stop_id];
-      const where = stop && (v.status === "STOPPED_AT" ? `At ${stop}` : `Next: ${stop}`);
-      tr.info = [`<b>Line ${l.name}</b>${to ? ` → ${to}` : ""}`, where, `Train ${v.label || v.id || "?"}`].filter(Boolean).join("<br>");
-    }
-    for (const [id, tr] of trains) if (!ids.has(id)) { tr.marker.remove(); trains.delete(id); }
-    status.className = "status";
-    status.textContent = `${live.length} train${live.length === 1 ? "" : "s"} running · updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
-  } catch (e) {
-    status.className = "status err";
-    status.textContent = `Live data unavailable (${e.message}). Retrying…`;
-  }
-  setTimeout(poll, POLL_MS);
+// Ottawa wall-clock: service date (YYYYMMDD), weekday (0 = Monday) and seconds since midnight.
+const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", weekday: "short" });
+function ottawa(ms) {
+  const p = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { date: p.year + p.month + p.day, wd: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(p.weekday), sec: +p.hour * 3600 + +p.minute * 60 + +p.second };
+}
+function running(day) { // service indices running on that Ottawa day
+  return new Set(sched.service_ids.map((id, i) => [id, i]).filter(([id]) => {
+    const c = sched.services[id];
+    if (c.remove.includes(day.date)) return false;
+    return c.add.includes(day.date) || (c.days[day.wd] === "1" && c.start <= day.date && day.date <= c.end);
+  }).map(([, i]) => i));
 }
 
-let last = performance.now();
-function frame(t) {
-  const dt = Math.min((t - last) / 1000, 1), now = Date.now() / 1000;
-  last = t;
-  for (const tr of trains.values()) {
-    const moving = Math.min(Math.max(0, now - tr.t0 - tr.dwell), MAX_EXTRAP_S);
-    // Never run past the next station ahead of the last fix: the train pulls in and waits there for a fresh fix.
-    const ahead0 = tr.d0 + tr.sign * 40;
-    const next = tr.sign > 0 ? tr.l.stationD.find((x) => x > ahead0) ?? tr.l.length : tr.l.stationD.findLast((x) => x < ahead0) ?? 0;
-    const est = tr.d0 + tr.sign * tr.speed * moving;
-    const target = tr.sign > 0 ? Math.min(est, next) : Math.max(est, next);
-    // Ease toward the estimate so new fixes slide in instead of teleporting; snap if way off.
-    // A fix slightly behind the estimate means the train was slower than guessed: wait rather than reverse.
-    const delta = target - tr.d;
-    if (Math.abs(delta) > 2000) tr.d = target;
-    else if (delta * tr.sign > 0 || Math.abs(delta) > 500) tr.d += delta * Math.min(1, dt * 2);
-    const here = pointAt(tr.l, tr.d), ahead = pointAt(tr.l, tr.d + tr.sign * 30);
+// Where a trip is at time t (seconds after its service day's midnight), or null if not running.
+const ease = (f) => f * f * (3 - 2 * f); // accelerate out of a station, brake into the next
+function locate(row, t) {
+  const n = (row.length - 3) / 3, l = LINES[row[0]], at = (i, k) => row[3 + i * 3 + k];
+  if (t < at(0, 1) - 60 || t > at(n - 1, 2) + 30) return null; // appear a minute early at the terminus, linger 30 s
+  for (let i = 0; i < n; i++) {
+    const arr = at(i, 1), dep = at(i, 2) + DWELL_S;
+    if (t <= dep || i === n - 1) return { l, d: l.sd[at(i, 0)], i, stopped: true, next: i, sign: i < n - 1 && l.sd[at(i + 1, 0)] < l.sd[at(i, 0)] ? -1 : 1, eta: arr };
+    const nArr = at(i + 1, 1);
+    if (t < nArr) {
+      const a = l.sd[at(i, 0)], b = l.sd[at(i + 1, 0)], f = (t - dep) / Math.max(1, nArr - dep);
+      return { l, d: a + (b - a) * ease(Math.min(1, Math.max(0, f))), i, stopped: false, next: i + 1, sign: b < a ? -1 : 1, eta: nArr };
+    }
+  }
+  return null;
+}
+
+const hhmm = (s) => `${Math.floor(s / 3600) % 24}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`;
+let lastScan = 0, today, yesterday;
+function frame() {
+  const nowMs = Date.now(), now = ottawa(nowMs);
+  if (nowMs - lastScan > 60000) { // service calendars only change at midnight
+    lastScan = nowMs;
+    today = running(now);
+    yesterday = running(ottawa(nowMs - 86400000)); // after-midnight trips belong to yesterday's service (times > 24:00)
+  }
+  const t = now.sec + (nowMs % 1000) / 1000, seen = new Set();
+  sched.trips.forEach((row, k) => {
+    const pos = (today.has(row[2]) && locate(row, t)) || (yesterday.has(row[2]) && locate(row, t + 86400));
+    if (!pos) return;
+    seen.add(k);
+    let tr = trains.get(k);
+    if (!tr) {
+      const el = div("train", trainSvg(pos.l.color));
+      el.style.setProperty("--c", pos.l.color);
+      el.title = `Line ${pos.l.name} train`;
+      // subpixelPositioning: no 1px stepping when a train crawls across the screen at city zoom.
+      tr = { marker: new maplibregl.Marker({ element: el, rotationAlignment: "map", pitchAlignment: "map", subpixelPositioning: true }).setLngLat(pointAt(pos.l, pos.d)).addTo(map) };
+      hover(el, () => tr.marker.getLngLat(), () => tr.info);
+      trains.set(k, tr);
+    }
+    const here = pointAt(pos.l, pos.d), ahead = pointAt(pos.l, pos.d + pos.sign * 30);
     tr.marker.setLngLat(here);
     // Sprite points east; marker rotation is clockwise from north.
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
     if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
-  }
+    const stn = pos.l.stations[row[3 + pos.next * 3]].name;
+    tr.info = `<b>Line ${pos.l.name}</b> → ${pos.l.headsigns[row[1]]}<br>${pos.stopped ? `At ${stn}` : `Next: ${stn} · ${hhmm(pos.eta)}`}<br><small>Scheduled</small>`;
+  });
+  for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
+  const status = document.getElementById("status");
+  status.textContent = seen.size ? `${seen.size} train${seen.size === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now";
   requestAnimationFrame(frame);
 }
 </script>

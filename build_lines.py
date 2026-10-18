@@ -1,4 +1,4 @@
-"""Regenerate lines.json from OC Transpo static GTFS. Usage: python3 build_lines.py <unzipped GTFS dir>"""
+"""Regenerate lines.json + schedule.json from OC Transpo static GTFS. Usage: python3 build_lines.py <unzipped GTFS dir>"""
 import csv, json, math, re, sys, os, unicodedata, urllib.parse, urllib.request
 
 d = sys.argv[1]
@@ -18,11 +18,13 @@ for t in trips:
     k, n = (t["route_id"], t["direction_id"]), len(shapes[t["shape_id"]])
     if k not in best or n > best[k][0]:
         best[k] = (n, t)
-want = {t["trip_id"] for _, t in best.values()}
-seq = {}
+rail_trips = {t["trip_id"] for t in trips}
+seq, times = {}, {}
+hms = lambda x: (lambda h, m, s: h * 3600 + m * 60 + s)(*map(int, x.split(":")))
 for st in rd("stop_times.txt"):
-    if st["trip_id"] in want:
+    if st["trip_id"] in rail_trips:
         seq.setdefault(st["trip_id"], []).append((int(st["stop_sequence"]), st["stop_id"]))
+        times.setdefault(st["trip_id"], []).append((int(st["stop_sequence"]), st["stop_id"], hms(st["arrival_time"]), hms(st["departure_time"])))
 
 stops = {s["stop_id"]: s for s in rd("stops.txt")}
 def station(sid):
@@ -37,7 +39,12 @@ norm = lambda n: unicodedata.normalize("NFKD", re.split(r"[~/]", n)[0]).encode("
 q = '[out:json][timeout:60];node["railway"="station"]["station"="light_rail"](45.2,-76.0,45.55,-75.4);out;'
 req = urllib.request.Request("https://overpass-api.de/api/interpreter?" + urllib.parse.urlencode({"data": q}),
                              headers={"User-Agent": "otrain-map build script", "Accept": "application/json"})
-osm = {norm(e["tags"]["name"]): (e["lat"], e["lon"]) for e in json.load(urllib.request.urlopen(req))["elements"] if "name" in e["tags"]}
+for attempt in range(5):  # Overpass throws the odd 502/504
+    try: elements = json.load(urllib.request.urlopen(req, timeout=90))["elements"]; break
+    except urllib.error.HTTPError as e:
+        if attempt == 4: raise
+        print("  Overpass", e.code, "- retrying"); __import__("time").sleep(10)
+osm = {norm(e["tags"]["name"]): (e["lat"], e["lon"]) for e in elements if "name" in e["tags"]}
 
 K = 111320 * math.cos(math.radians(45.4))
 def snap(lat, lon, shape):
@@ -67,5 +74,29 @@ for rid in sorted(routes, key=lambda r: int(routes[r]["route_sort_order"])):
         "stations": [placed(station(sid), [[la, lo] for _, la, lo in sorted(shapes[t0["shape_id"]])]) for _, sid in sorted(seq[t0["trip_id"]])],
         "stop_names": {sid: station(sid)["name"] for t in dirs for _, sid in seq[t["trip_id"]]},
     })
-json.dump(out, open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lines.json"), "w"), separators=(",", ":"))
+here = os.path.dirname(os.path.abspath(__file__))
+json.dump(out, open(os.path.join(here, "lines.json"), "w"), separators=(",", ":"))
+
+# Timetable: OC Transpo's GTFS-RT has no O-Train data, so the page animates trains from this.
+# trips: [line index, direction, service index, s0, arr0, dep0, s1, arr1, dep1, ...] (s = station index on that line, times = s after midnight)
+services = sorted({t["service_id"] for t in trips})
+sched = {"services": {}, "trips": []}
+for c in rd("calendar.txt"):
+    if c["service_id"] in services:
+        sched["services"][c["service_id"]] = {"days": "".join(c[d] for d in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")),
+                                              "start": c["start_date"], "end": c["end_date"], "add": [], "remove": []}
+for c in rd("calendar_dates.txt"):
+    if c["service_id"] in services:
+        e = sched["services"].setdefault(c["service_id"], {"days": "0000000", "start": "0", "end": "0", "add": [], "remove": []})
+        e["add" if c["exception_type"] == "1" else "remove"].append(c["date"])
+sched["service_ids"] = services
+for t in trips:
+    li = next(i for i, l in enumerate(out) if l["route_id"] == t["route_id"])
+    idx = {st["name"]: i for i, st in enumerate(out[li]["stations"])}
+    row = [li, int(t["direction_id"]), services.index(t["service_id"])]
+    for _, sid, arr, dep in sorted(times[t["trip_id"]]):
+        if station(sid)["name"] in idx: row += [idx[station(sid)["name"]], arr, dep]
+    if len(row) > 6: sched["trips"].append(row)
+json.dump(sched, open(os.path.join(here, "schedule.json"), "w"), separators=(",", ":"))
+print(len(sched["trips"]), "rail trips,", len(services), "services")
 for l in out: print(l["name"], l["headsigns"], len(l["shape"]), "pts,", len(l["stations"]), "stations,", len(l["stop_names"]), "stop ids")
