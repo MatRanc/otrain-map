@@ -40,9 +40,6 @@
   /* --len is set from the zoom level. */
   .train { width: var(--len, 34px); aspect-ratio: 100 / 24; filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.45)); cursor: pointer; }
   .train svg { display: block; width: 100%; height: 100%; }
-  .dots .train { width: 16px; aspect-ratio: 1; border-radius: 50%; background: var(--c); border: 3px solid #fff;
-    box-sizing: border-box; filter: none; box-shadow: 0 0 0 1.5px #222, 0 2px 5px rgba(0,0,0,.4); }
-  .dots .train svg { display: none; }
   .alert { margin-top: 8px; padding-left: 8px; border-left: 3px solid var(--c); font-size: 13px; max-width: 260px; }
   .alert a { color: inherit; font-weight: 600; }
   .bus { padding: 1px 5px; border-radius: 4px; background: var(--c); color: #fff; font-size: 11px; font-weight: 700;
@@ -102,7 +99,6 @@ map.addControl({
       </button>
       <div class="layers-panel" hidden>
         <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
-        <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
       </div>`);
     const btn = el.querySelector("button"), panel = el.querySelector(".layers-panel");
     const show = (on) => { panel.hidden = !on; btn.setAttribute("aria-expanded", on); };
@@ -125,7 +121,6 @@ const pref = (id, def, apply) => {
   el.addEventListener("change", go);
   return go;
 };
-pref("models", true, (on) => document.body.classList.toggle("dots", !on))();
 const applySat = pref("sat", false, (on) => {
   if (!map.getLayer("sat")) return;
   // Satellite imagery already shows the buildings, so drop the basemap's 3D extrusions while it's on.
@@ -324,7 +319,6 @@ function frame() {
     let tr = trains.get(k);
     if (!tr) {
       const el = div("train", trainSvg(pos.l.color));
-      el.style.setProperty("--c", pos.l.color);
       el.title = `Line ${pos.l.name} train`;
       // subpixelPositioning: no 1px stepping when a train crawls across the screen at city zoom.
       tr = { marker: new maplibregl.Marker({ element: el, rotationAlignment: "map", pitchAlignment: "map", subpixelPositioning: true }).setLngLat(pointAt(pos.l, pos.d)).addTo(map) };
