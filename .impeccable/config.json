@@ -1,0 +1,23 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "open sans",
+        "createdAt": "2026-10-18T16:16:41.347Z",
+        "reason": "Claude: octranspo.com loads Open Sans; user asked to follow OC Transpo's design theme"
+      },
+      {
+        "rule": "cream-palette",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-10-18T16:16:41.369Z",
+        "reason": "Claude: body bg only shows before map tiles load; matches the beige basemap from the user's reference screenshot"
+      }
+    ]
+  }
+}

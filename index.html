@@ -20,10 +20,14 @@
     display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); box-sizing: border-box; }
   .legend .badge { width: 22px; height: 22px; font-size: 13px; }
   .stn { background: #fff; border: 2.5px solid #222; border-radius: 99px; box-sizing: border-box; }
-  .train { position: relative; width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; box-sizing: border-box; box-shadow: 0 0 0 1.5px #222, 0 2px 6px rgba(0,0,0,.4); }
-  .train::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 3px solid currentColor; animation: ping 2s ease-out infinite; }
-  @keyframes ping { to { transform: scale(2.4); opacity: 0; } }
-  @media (prefers-reduced-motion: reduce) { .train::after { animation: none; display: none; } }
+  /* --len is set from the zoom level; --a is the track heading, set per frame. */
+  .train { position: absolute; width: var(--len, 34px); aspect-ratio: 100 / 24; transform: translate(-50%, -50%) rotate(var(--a, 0rad));
+    filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.45)); cursor: pointer; }
+  .train svg { display: block; width: 100%; height: 100%; }
+  .dots .train { width: 16px; aspect-ratio: 1; border-radius: 50%; background: var(--c); border: 3px solid #fff;
+    box-sizing: border-box; transform: translate(-50%, -50%); filter: none; box-shadow: 0 0 0 1.5px #222, 0 2px 5px rgba(0,0,0,.4); }
+  .dots .train svg { display: none; }
+  .toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; cursor: pointer; }
   .leaflet-tooltip { font-family: inherit; font-size: 13px; }
 </style>
 </head>
@@ -32,6 +36,7 @@
 <div class="card">
   <h1>O-Train Live</h1>
   <div class="legend" id="legend"></div>
+  <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
   <div class="status" id="status" role="status">Loading…</div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -39,13 +44,28 @@
 // Worker URL (see README). ?feed=<url> overrides it for testing.
 const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.REPLACE_ME.workers.dev";
 const POLL_MS = 15000, STALE_S = 300;
+// ponytail: trains glide along the track between ~30s GPS fixes by dead reckoning at a typical speed.
+// Looks alive, not exact. Per-segment speeds from the schedule would be the upgrade if accuracy matters.
+const CRUISE = 11, DWELL_S = 20, MAX_EXTRAP_S = 60; // m/s (~40 km/h avg), station stop, give-up horizon
 
-const map = L.map("map", { zoomControl: false, zoomSnap: 0.25 });
+// zoomSnap 0 = continuous wheel/trackpad zoom instead of stepping.
+const map = L.map("map", { zoomControl: false, zoomSnap: 0, zoomDelta: 0.5, wheelPxPerZoomLevel: 90 });
 L.control.zoom({ position: "bottomright" }).addTo(map);
 L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
   maxZoom: 19, attribution: "Tiles &copy; Esri · Data: OC Transpo",
 }).addTo(map);
 map.createPane("stations").style.zIndex = 450;
+// Trains drawn at true length (~90 m) once zoomed in, never smaller than 34 px.
+const sizeTrains = () => map.getContainer().style.setProperty("--len",
+  `${Math.max(34, 90 / (156543 * Math.cos(45.4 * Math.PI / 180) / 2 ** map.getZoom()))}px`);
+let zooming = false;
+map.on("zoomstart", () => (zooming = true)).on("zoomend", () => { zooming = false; sizeTrains(); });
+
+const models = document.getElementById("models");
+const setModels = () => { document.body.classList.toggle("dots", !models.checked); try { localStorage.setItem("models", models.checked ? "1" : "0"); } catch {} };
+try { models.checked = localStorage.getItem("models") !== "0"; } catch {}
+models.addEventListener("change", setModels);
+setModels();
 
 const byRoute = {};
 const trainLayer = L.layerGroup().addTo(map);
@@ -54,6 +74,7 @@ fetch("lines.json").then((r) => r.json()).then((lines) => {
   const seen = new Set();
   for (const l of lines) {
     byRoute[l.route_id] = l;
+    measure(l);
     L.polyline(l.shape, { color: "#fff", weight: 9, opacity: 0.9 }).addTo(map);
     L.polyline(l.shape, { color: l.color, weight: 5 }).addTo(map);
     document.getElementById("legend").insertAdjacentHTML("beforeend",
@@ -76,8 +97,48 @@ fetch("lines.json").then((r) => r.json()).then((lines) => {
     }
   }
   map.fitBounds(L.latLngBounds(lines.flatMap((l) => l.shape)), { paddingTopLeft: [24, 48], paddingBottomRight: [24, 24] });
+  sizeTrains();
   poll();
 });
+
+// Track geometry: flat-earth metres are plenty at city scale.
+const KX = 111320 * Math.cos(45.4 * Math.PI / 180), KY = 110540;
+function measure(l) {
+  l.xy = l.shape.map(([la, lo]) => [lo * KX, la * KY]);
+  l.cum = [0];
+  for (let i = 1; i < l.xy.length; i++) l.cum.push(l.cum[i - 1] + Math.hypot(l.xy[i][0] - l.xy[i - 1][0], l.xy[i][1] - l.xy[i - 1][1]));
+  l.length = l.cum.at(-1);
+}
+function project(l, lat, lon) { // -> distance along the line of the nearest point
+  const px = lon * KX, py = lat * KY;
+  let best = Infinity, d = 0;
+  for (let i = 1; i < l.xy.length; i++) {
+    const [ax, ay] = l.xy[i - 1], [bx, by] = l.xy[i], dx = bx - ax, dy = by - ay;
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1)));
+    const e = (ax + t * dx - px) ** 2 + (ay + t * dy - py) ** 2;
+    if (e < best) { best = e; d = l.cum[i - 1] + t * (l.cum[i] - l.cum[i - 1]); }
+  }
+  return d;
+}
+function pointAt(l, d) {
+  let i = 1;
+  while (i < l.cum.length - 1 && l.cum[i] < d) i++;
+  const t = (d - l.cum[i - 1]) / (l.cum[i] - l.cum[i - 1] || 1), [a, b] = [l.shape[i - 1], l.shape[i]];
+  return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+}
+
+// Top-down Citadis-ish train pointing right: white body, dark windshield + headlights up front, line-colour stripe.
+const trainSvg = (c) => `<div class="train" style="--c:${c}"><svg viewBox="0 0 100 24" aria-hidden="true">
+  <path d="M5 2H82Q98 4 99 12Q98 20 82 22H5Q1 22 1 18V6Q1 2 5 2Z" fill="#fff" stroke="#2b2b2b" stroke-width="1"/>
+  <path d="M86 4.6Q96.5 6.5 97 12Q96.5 17.5 86 19.4Q89.5 12 86 4.6Z" fill="#1d232b"/>
+  <path d="M74 2.2Q82 2.6 86 4.6M74 21.8Q82 21.4 86 19.4" stroke="#d30f1d" stroke-width="2.2" fill="none"/>
+  <circle cx="95" cy="7.5" r="1.3" fill="#ffd54a"/><circle cx="95" cy="16.5" r="1.3" fill="#ffd54a"/>
+  <rect x="5" y="10.5" width="72" height="3" rx="1.5" fill="${c}"/>
+  <path d="M26 2.5V21.5M50 2.5V21.5" stroke="#555" stroke-width="1"/>
+  <rect x="35" y="6" width="8" height="3" rx="1" fill="#9aa0a6"/><rect x="2.2" y="7" width="1.6" height="10" rx=".8" fill="#d30f1d"/>
+</svg></div>`;
+
+const trains = new Map(); // vehicle id -> { l, marker, d (shown), d0 (fix), t0, sign, speed, dwell }
 
 async function poll() {
   const status = document.getElementById("status");
@@ -87,20 +148,30 @@ async function poll() {
     const { vehicles } = await r.json();
     const now = Date.now() / 1000;
     const live = vehicles.filter((v) => byRoute[v.route_id] && (!v.timestamp || now - v.timestamp < STALE_S));
-    trainLayer.clearLayers();
+    const ids = new Set();
     for (const v of live) {
-      const l = byRoute[v.route_id];
+      const l = byRoute[v.route_id], id = v.id || v.trip_id;
+      ids.add(id);
+      const d0 = project(l, v.lat, v.lon);
+      let tr = trains.get(id);
+      if (!tr || tr.l !== l) {
+        if (tr) tr.marker.remove();
+        tr = { l, d: d0, marker: L.marker(pointAt(l, d0), { zIndexOffset: 1000, title: `Line ${l.name} train`,
+          icon: L.divIcon({ className: "", iconSize: [0, 0], html: trainSvg(l.color) }) })
+          .bindTooltip("", { direction: "top", offset: [0, -8] }).addTo(trainLayer) };
+        trains.set(id, tr);
+      }
+      // Shape follows direction 0, so direction 0 runs toward increasing distance.
+      if (v.timestamp || tr.d0 !== d0) tr.t0 = v.timestamp || now; // feeds without timestamps: restart only on a new fix
+      Object.assign(tr, { d0, sign: v.direction_id === 1 ? -1 : 1,
+        speed: v.speed > 1 ? v.speed : CRUISE, dwell: v.status === "STOPPED_AT" ? DWELL_S : 0 });
       const to = l.headsigns[v.direction_id] || "";
       const stop = l.stop_names[v.stop_id];
       const where = stop && (v.status === "STOPPED_AT" ? `At ${stop}` : `Next: ${stop}`);
-      const age = v.timestamp ? `${Math.round(now - v.timestamp)}s ago` : "";
-      L.marker([v.lat, v.lon], { zIndexOffset: 1000, title: `Line ${l.name} train`,
-        icon: L.divIcon({ className: "", iconSize: [18, 18],
-          html: `<div class="train" style="background:${l.color};color:${l.color}"></div>` }) })
-        .bindTooltip([`<b>Line ${l.name}</b>${to ? ` → ${to}` : ""}`, where, `Train ${v.label || v.id || "?"}${age ? ` · ${age}` : ""}`]
-          .filter(Boolean).join("<br>"), { direction: "top", offset: [0, -10] })
-        .addTo(trainLayer);
+      tr.marker.setTooltipContent([`<b>Line ${l.name}</b>${to ? ` → ${to}` : ""}`, where, `Train ${v.label || v.id || "?"}`]
+        .filter(Boolean).join("<br>"));
     }
+    for (const [id, tr] of trains) if (!ids.has(id)) { tr.marker.remove(); trains.delete(id); }
     status.className = "status";
     status.textContent = `${live.length} train${live.length === 1 ? "" : "s"} running · updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
   } catch (e) {
@@ -109,6 +180,28 @@ async function poll() {
   }
   setTimeout(poll, POLL_MS);
 }
+
+let last = performance.now();
+function frame(t) {
+  const dt = Math.min((t - last) / 1000, 1), now = Date.now() / 1000;
+  last = t;
+  for (const tr of trains.values()) {
+    const moving = Math.min(Math.max(0, now - tr.t0 - tr.dwell), MAX_EXTRAP_S);
+    const target = Math.max(0, Math.min(tr.l.length, tr.d0 + tr.sign * tr.speed * moving));
+    // Ease toward the estimate so new fixes slide in instead of teleporting; snap if way off.
+    // A fix slightly behind the estimate means the train was slower than guessed: wait rather than reverse.
+    const delta = target - tr.d;
+    if (Math.abs(delta) > 2000) tr.d = target;
+    else if (delta * tr.sign > 0 || Math.abs(delta) > 500) tr.d += delta * Math.min(1, dt * 2);
+    if (zooming) continue; // moving markers mid-zoom-animation makes zooming stutter
+    const here = pointAt(tr.l, tr.d), ahead = pointAt(tr.l, tr.d + tr.sign * 30);
+    tr.marker.setLatLng(here);
+    const a = map.latLngToLayerPoint(here), b = map.latLngToLayerPoint(ahead);
+    if (a.distanceTo(b) > 0.01) tr.marker.getElement()?.firstChild.style.setProperty("--a", `${Math.atan2(b.y - a.y, b.x - a.x)}rad`);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
