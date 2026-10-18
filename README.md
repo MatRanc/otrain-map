@@ -14,4 +14,4 @@ Why the Worker: OC Transpo's feed only allows CORS from its own developer portal
 ## Dev
 - `python3 -m http.server` then open `/?feed=<url>` to point at any feed (e.g. a local mock JSON).
 - `node test_worker.mjs` checks the protobuf decoder.
-- Line shapes/stations: download https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip, unzip, `python3 build_lines.py <dir>` → `lines.json`. Rerun when OC Transpo changes service (e.g. Line 1 extensions open).
+- Line shapes/stations: download https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip, unzip, `python3 build_lines.py <dir>` → `lines.json` (station positions come from OpenStreetMap via Overpass, snapped onto the line). Rerun when OC Transpo changes service (e.g. Line 1 extensions open).

@@ -37,6 +37,7 @@
   <h1>O-Train Live</h1>
   <div class="legend" id="legend"></div>
   <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
+  <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
   <div class="status" id="status" role="status">Loading…</div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -46,24 +47,28 @@ const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain
 const POLL_MS = 15000, STALE_S = 300;
 // ponytail: trains glide along the track between ~30s GPS fixes by dead reckoning at a typical speed.
 // Looks alive, not exact. Per-segment speeds from the schedule would be the upgrade if accuracy matters.
-const CRUISE = 11, DWELL_S = 20, MAX_EXTRAP_S = 60; // m/s (~40 km/h avg), station stop, give-up horizon
+const CRUISE = 11, DWELL_S = 20, MAX_EXTRAP_S = 120; // m/s (~40 km/h avg), station stop, give-up horizon
 
 const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty",
   center: [-75.69, 45.37], zoom: 10.5, attributionControl: false });
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
 map.addControl(new maplibregl.AttributionControl({ customAttribution: "Data: OC Transpo", compact: true }));
 
-// Trains drawn at true length (~90 m) once zoomed in, never smaller than 34 px.
-const sizeTrains = () => map.getContainer().style.setProperty("--len",
-  `${Math.max(34, 90 / (40075016 * Math.cos(45.4 * Math.PI / 180) / 512 / 2 ** map.getZoom()))}px`);
+// Trains grow a little as you zoom in, but stay a symbol (34–60 px), not to scale.
+const sizeTrains = () => map.getContainer().style.setProperty("--len", `${Math.min(60, Math.max(34, 34 + (map.getZoom() - 12) * 8))}px`);
 map.on("zoom", sizeTrains);
 sizeTrains();
 
-const models = document.getElementById("models");
-const setModels = () => { document.body.classList.toggle("dots", !models.checked); try { localStorage.setItem("models", models.checked ? "1" : "0"); } catch {} };
-try { models.checked = localStorage.getItem("models") !== "0"; } catch {}
-models.addEventListener("change", setModels);
-setModels();
+// Checkbox remembered per viewer; apply(on) runs now and on change.
+const pref = (id, def, apply) => {
+  const el = document.getElementById(id);
+  try { const v = localStorage.getItem(id); if (v) el.checked = v === "1"; else el.checked = def; } catch { el.checked = def; }
+  const go = () => { apply(el.checked); try { localStorage.setItem(id, el.checked ? "1" : "0"); } catch {} };
+  el.addEventListener("change", go);
+  return go;
+};
+pref("models", true, (on) => document.body.classList.toggle("dots", !on))();
+const applySat = pref("sat", false, (on) => map.getLayer("sat") && map.setLayoutProperty("sat", "visibility", on ? "visible" : "none"));
 
 // One shared hover popup for stations and trains.
 const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
@@ -77,6 +82,12 @@ const div = (cls, html = "") => Object.assign(document.createElement("div"), { c
 const ll = ([la, lo]) => [lo, la];
 
 Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
+  // Satellite sits above the basemap's fills/roads but under its labels, so place names stay readable.
+  map.addSource("sat", { type: "raster", tileSize: 256, maxzoom: 19, attribution: "Imagery &copy; Esri",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"] });
+  map.addLayer({ id: "sat", type: "raster", source: "sat", layout: { visibility: "none" } },
+    map.getStyle().layers.find((x) => x.type === "symbol")?.id);
+  applySat();
   for (const l of lines) {
     byRoute[l.route_id] = l;
     measure(l);
@@ -88,6 +99,7 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
     document.getElementById("legend").insertAdjacentHTML("beforeend",
       `<span><span class="badge" style="background:${l.color}">${l.name}</span>Line ${l.name}</span>`);
   }
+  for (const l of lines) l.stationD = l.stations.map((s) => project(l, s.lat, s.lon)).sort((a, b) => a - b);
   const seen = new Set();
   for (const l of lines) {
     for (const s of l.stations) {
@@ -200,7 +212,11 @@ function frame(t) {
   last = t;
   for (const tr of trains.values()) {
     const moving = Math.min(Math.max(0, now - tr.t0 - tr.dwell), MAX_EXTRAP_S);
-    const target = Math.max(0, Math.min(tr.l.length, tr.d0 + tr.sign * tr.speed * moving));
+    // Never run past the next station ahead of the last fix: the train pulls in and waits there for a fresh fix.
+    const ahead0 = tr.d0 + tr.sign * 40;
+    const next = tr.sign > 0 ? tr.l.stationD.find((x) => x > ahead0) ?? tr.l.length : tr.l.stationD.findLast((x) => x < ahead0) ?? 0;
+    const est = tr.d0 + tr.sign * tr.speed * moving;
+    const target = tr.sign > 0 ? Math.min(est, next) : Math.max(est, next);
     // Ease toward the estimate so new fixes slide in instead of teleporting; snap if way off.
     // A fix slightly behind the estimate means the train was slower than guessed: wait rather than reverse.
     const delta = target - tr.d;
