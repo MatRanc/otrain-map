@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>O-Train Live</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap">
 <style>
@@ -76,6 +78,8 @@ const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfre
   center: [-75.69, 45.37], zoom: 10.5, attributionControl: false });
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
 map.addControl(new maplibregl.AttributionControl({ customAttribution: "Data: OC Transpo", compact: true }));
+// MapLibre opens the compact credits on load; on phones that box covers the south end of Line 2, so start it closed (the ⓘ opens it).
+map.once("load", () => { if (matchMedia("(max-width: 640px)").matches) document.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show"); });
 
 // Trains grow a little as you zoom in, but stay a symbol (34–60 px), not to scale.
 const sizeTrains = () => map.getContainer().style.setProperty("--len", `${Math.min(60, Math.max(34, 34 + (map.getZoom() - 12) * 8))}px`);
