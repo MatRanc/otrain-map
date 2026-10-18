@@ -83,12 +83,15 @@ map.on("zoom", sizeTrains);
 sizeTrains();
 
 
-// One shared hover popup for stations and trains.
+// One shared popup: hover shows it; clicking a train pins it (it follows the train) until you click elsewhere.
 const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+let pinned = null; // train id whose popup is pinned
 const hover = (el, getLngLat, getHtml) => {
-  el.addEventListener("mouseenter", () => popup.setLngLat(getLngLat()).setHTML(getHtml()).addTo(map));
-  el.addEventListener("mouseleave", () => popup.remove());
+  el.addEventListener("mouseenter", () => { if (pinned == null) popup.setLngLat(getLngLat()).setHTML(getHtml()).addTo(map); });
+  el.addEventListener("mouseleave", () => { if (pinned == null) popup.remove(); });
 };
+const unpin = () => { pinned = null; popup.remove(); };
+map.on("click", unpin); // marker clicks stop propagation, so this only fires for the map itself
 
 const div = (cls, html = "") => Object.assign(document.createElement("div"), { className: cls, innerHTML: html });
 const ll = ([la, lo]) => [lo, la];
@@ -371,6 +374,7 @@ function frame() {
       // subpixelPositioning: no 1px stepping when a train crawls across the screen at city zoom.
       tr = { marker: new maplibregl.Marker({ element: el, rotationAlignment: "map", pitchAlignment: "map", subpixelPositioning: true }).setLngLat(pointAt(pos.l, pos.d)).addTo(map) };
       hover(el, () => tr.marker.getLngLat(), () => tr.info);
+      el.addEventListener("click", (e) => { e.stopPropagation(); pinned = k; popup.setLngLat(tr.marker.getLngLat()).setHTML(tr.info).addTo(map); });
       trains.set(k, tr);
     }
     const here = pointAt(pos.l, pos.d), ahead = pointAt(pos.l, pos.d + pos.sign * 30);
@@ -383,6 +387,11 @@ function frame() {
     tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
+  if (pinned != null) { // keep the pinned popup on its train; drop it when the train leaves service
+    const tr = trains.get(pinned);
+    if (!tr) unpin();
+    else { popup.setLngLat(tr.marker.getLngLat()); if (tr.info !== tr.shown) popup.setHTML((tr.shown = tr.info)); }
+  }
   for (const b of buses.values()) { // glide to each new GPS fix instead of jumping
     b.at = b.at.map((x, i) => x + (b.to[i] - x) * 0.02);
     b.marker.setLngLat(b.at);
