@@ -36,7 +36,11 @@ def station(sid):
 # GTFS parent-station coords are the centre of the whole complex (up to ~300 m off the track).
 # OSM station nodes match the basemap, so use those and snap them onto the line.
 norm = lambda n: unicodedata.normalize("NFKD", re.split(r"[~/]", n)[0]).encode("ascii", "ignore").decode().strip().lower()
-q = '[out:json][timeout:60];node["railway"="station"]["station"="light_rail"](45.2,-76.0,45.55,-75.4);out;'
+K = 111320 * math.cos(math.radians(45.4))
+# One Overpass call: station nodes + O-Train main-line tracks (yards/sidings/crossovers carry a service tag; skipped).
+BBOX = "(45.2,-76.0,45.55,-75.4)"
+q = (f'[out:json][timeout:90];(node["railway"="station"]["station"="light_rail"]{BBOX};'
+     f'way["railway"="light_rail"][!"service"]["name"~"^(Confederation Line|Ellwood Subdivision|Airport Subdivision)"]{BBOX};);out geom;')
 req = urllib.request.Request("https://overpass-api.de/api/interpreter?" + urllib.parse.urlencode({"data": q}),
                              headers={"User-Agent": "otrain-map build script", "Accept": "application/json"})
 for attempt in range(5):  # Overpass throws the odd 502/504
@@ -44,9 +48,10 @@ for attempt in range(5):  # Overpass throws the odd 502/504
     except urllib.error.HTTPError as e:
         if attempt == 4: raise
         print("  Overpass", e.code, "- retrying"); __import__("time").sleep(10)
-osm = {norm(e["tags"]["name"]): (e["lat"], e["lon"]) for e in elements if "name" in e["tags"]}
+osm = {norm(e["tags"]["name"]): (e["lat"], e["lon"]) for e in elements if e["type"] == "node" and "name" in e["tags"]}
+tracks = [[(p["lon"], p["lat"]) for p in e["geometry"]] for e in elements if e["type"] == "way"]
+print(" ", len(tracks), "OSM track ways")
 
-K = 111320 * math.cos(math.radians(45.4))
 def snap(lat, lon, shape):
     best = (1e18, lat, lon)
     for (a, b) in zip(shape, shape[1:]):
@@ -57,10 +62,20 @@ def snap(lat, lon, shape):
         if e < best[0]: best = (e, a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
     return round(best[1], 6), round(best[2], 6)
 
-# GTFS shapes jog sideways by a few metres here and there (visible kinks, trains wobble through them).
-# Resample every 5 m, average each point over +-40 m, keep one point per 10 m. Shifts real curves (R >= 200 m) < 1 m.
-def smooth(shape, step=5, half=8):
-    xy = [(lo * K, la * 110540) for la, lo in shape]
+# GTFS shapes are rough: Line 2's is typically 9 m and up to 80 m off the real track, with kinks.
+# Walk the GTFS shape every 5 m, snap each point to the nearest OSM main-line track within 250 m running the same way
+# (< 35 deg, so it never jumps onto a crossing line), then average over +-25 m so double track doesn't zigzag between
+# rails. Keep one point per 10 m. No track nearby -> keep the GTFS point.
+CELL = 300
+grid = {}
+for w, t in enumerate(tracks):
+    xy = [(lo * K, la * 110540) for lo, la in t]
+    for a, b in zip(xy, xy[1:]):
+        for cx in range(int(min(a[0], b[0]) // CELL) - 1, int(max(a[0], b[0]) // CELL) + 2):
+            for cy in range(int(min(a[1], b[1]) // CELL) - 1, int(max(a[1], b[1]) // CELL) + 2):
+                grid.setdefault((cx, cy), []).append((a, b, w))
+
+def resample(xy, step):
     out, carry = [xy[0]], 0.0
     for (ax, ay), (bx, by) in zip(xy, xy[1:]):
         seg = math.hypot(bx - ax, by - ay)
@@ -68,13 +83,42 @@ def smooth(shape, step=5, half=8):
         while t <= seg:
             out.append((ax + (bx - ax) * t / seg, ay + (by - ay) * t / seg)); t += step
         carry = seg - (t - step)
-    out.append(xy[-1])
+    return out + [xy[-1]]
+
+def snap_to_track(px, py, hx, hy, prev):
+    near = {}  # way -> (distance, point)
+    for (ax, ay), (bx, by), w in grid.get((int(px // CELL), int(py // CELL)), []):
+        dx, dy = bx - ax, by - ay
+        seg = math.hypot(dx, dy) or 1
+        if abs(dx * hx + dy * hy) / seg < math.cos(math.radians(35)): continue  # not running the same way
+        raw = ((px - ax) * dx + (py - ay) * dy) / (seg * seg)
+        t = max(0, min(1, raw))
+        qx, qy = ax + t * dx, ay + t * dy
+        e = math.hypot(qx - px, qy - py)
+        if e < 250 and e < near.get(w, (1e9,))[0]: near[w] = (e, (qx, qy), 0 <= raw <= 1)
+    if not near: return (px, py), None
+    w = min(near, key=lambda k: near[k][0])
+    # Stick to the track we were on (passing loops, double track) unless another is clearly closer, but not once we've
+    # run past the end of that piece of way (points would pile up on its end vertex).
+    if prev in near and near[prev][2] and near[prev][0] <= near[w][0] + 10: w = prev
+    return near[w][1], w
+
+def smooth(shape, step=5, half=5):
+    pts = resample([(lo * K, la * 110540) for la, lo in shape], step)
+    snapped, prev = [], None
+    for i, (px, py) in enumerate(pts):
+        (ax, ay), (bx, by) = pts[max(0, i - 4)], pts[min(len(pts) - 1, i + 4)]  # local direction over +-20 m
+        h = math.hypot(bx - ax, by - ay) or 1
+        pt, prev = snap_to_track(px, py, (bx - ax) / h, (by - ay) / h, prev)
+        snapped.append(pt)
     avg = []
-    for i in range(len(out)):
-        w = min(half, i, len(out) - 1 - i)  # shrink the window at the ends so the termini stay put
-        pts = out[i - w:i + w + 1]
-        avg.append((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)))
-    keep = avg[::2] + ([avg[-1]] if (len(avg) - 1) % 2 else [])
+    for i in range(len(snapped)):
+        w = min(half, i, len(snapped) - 1 - i)  # shrink the window at the ends so the termini stay put
+        win = snapped[i - w:i + w + 1]
+        avg.append((sum(p[0] for p in win) / len(win), sum(p[1] for p in win) / len(win)))
+    keep = []
+    for p in avg[::2] + [avg[-1]]:  # one point per ~10 m, dropping near-duplicates
+        if not keep or math.hypot(p[0] - keep[-1][0], p[1] - keep[-1][1]) > 2: keep.append(p)
     return [[round(y / 110540, 6), round(x / K, 6)] for x, y in keep]
 
 def placed(st, shape):
