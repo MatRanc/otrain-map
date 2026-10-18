@@ -134,6 +134,9 @@ const applySat = pref("sat", false, (on) => {
 });
 
 Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
+  // The style draws flat buildings only at zoom 13–14, then 3D from 14: drop the flat band and start 3D at 13.
+  if (map.getLayer("building")) map.removeLayer("building");
+  if (map.getLayer("building-3d")) map.setLayerZoomRange("building-3d", 13, 24);
   // Satellite sits above the basemap's fills/roads but under its labels, so place names stay readable.
   map.addSource("sat", { type: "raster", tileSize: 256, maxzoom: 19, attribution: "Imagery &copy; Esri",
     tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"] });
