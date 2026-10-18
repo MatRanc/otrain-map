@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>O-Train Live</title>
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap">
 <style>
   html, body, #map { height: 100%; margin: 0; }
+  /* No page pinch/double-tap zoom on the UI; the map handles its own gestures. */
+  html, body { touch-action: none; overscroll-behavior: none; }
   body { font-family: "Open Sans", system-ui, sans-serif; color: #222; background: #f2efe9; }
   .card { position: absolute; z-index: 2; top: 12px; left: 12px; background: #fff; border-radius: 8px;
     box-shadow: 0 2px 10px rgba(0,0,0,.18); padding: 12px 14px; max-width: calc(100vw - 52px); }
@@ -109,6 +111,9 @@ map.addControl({
   },
   onRemove() {},
 }, "bottom-right");
+
+// iOS Safari ignores user-scalable=no; cancelling its gesture events stops page zoom (map pinch uses touch events, unaffected).
+for (const t of ["gesturestart", "gesturechange"]) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 
 const card = document.querySelector(".card"), phone = matchMedia("(max-width: 640px)");
 document.getElementById("info").open = !phone.matches; // phones start with the info card collapsed
