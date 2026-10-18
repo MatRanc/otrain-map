@@ -1,1 +1,3 @@
 .mock.json
+.wrangler/
+.impeccable/hook.cache.json

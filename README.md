@@ -9,7 +9,8 @@ Why the Worker: OC Transpo's feed only allows CORS from its own developer portal
 2. Cloudflare dashboard → Workers → Create → name it `otrain-feed`, paste `worker.js`, deploy.
    Settings → Variables → add secret `OCT_KEY` = your key.
 3. Put the Worker URL in `FEED` in `index.html`.
-4. DNS (Porkbun): `CNAME otrain → matranc.github.io`. Repo Settings → Pages → deploy from `main`.
+4. DNS (Porkbun): `CNAME otrain → matranc.github.io`. Pages deploys from `main` (root).
+5. `.github/workflows/timetable.yml` rebuilds the timetable weekly; run it manually after an OC Transpo service change.
 
 ## Dev
 - `python3 -m http.server` then open `/?feed=<url>` to point at any feed (e.g. a local mock JSON).

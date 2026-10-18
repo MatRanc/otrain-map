@@ -1,0 +1,22 @@
+# Weekly: rebuild lines.json + schedule.json from OC Transpo's static GTFS, commit if anything changed.
+# Pages republishes on the push. Run it by hand from the Actions tab after a service change.
+name: Refresh timetable
+on:
+  schedule: [{ cron: "17 9 * * 1" }] # Mondays 09:17 UTC (~5 am Ottawa)
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -sSfL -o gtfs.zip https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip && unzip -q gtfs.zip -d gtfs
+      - run: python3 build_lines.py gtfs
+      - name: Commit if changed
+        run: |
+          git diff --quiet -- lines.json schedule.json && { echo "No changes"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Refresh timetable from OC Transpo GTFS" -- lines.json schedule.json
+          git push
