@@ -78,7 +78,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 json.dump(out, open(os.path.join(here, "lines.json"), "w"), separators=(",", ":"))
 
 # Timetable: OC Transpo's GTFS-RT has no O-Train data, so the page animates trains from this.
-# trips: [line index, direction, service index, s0, arr0, dep0, s1, arr1, dep1, ...] (s = station index on that line, times = s after midnight)
+# trips: [line index, direction, service index, train, s0, arr0, dep0, s1, arr1, dep1, ...]
+#   train = one physical vehicle (GTFS block_id; a blank block counts as its own train), so the page draws one marker per train
+#   s = station index on that line, times = seconds after midnight
 services = sorted({t["service_id"] for t in trips})
 sched = {"services": {}, "trips": []}
 for c in rd("calendar.txt"):
@@ -90,13 +92,15 @@ for c in rd("calendar_dates.txt"):
         e = sched["services"].setdefault(c["service_id"], {"days": "0000000", "start": "0", "end": "0", "add": [], "remove": []})
         e["add" if c["exception_type"] == "1" else "remove"].append(c["date"])
 sched["service_ids"] = services
+blocks = {}
 for t in trips:
     li = next(i for i, l in enumerate(out) if l["route_id"] == t["route_id"])
     idx = {st["name"]: i for i, st in enumerate(out[li]["stations"])}
-    row = [li, int(t["direction_id"]), services.index(t["service_id"])]
+    train = blocks.setdefault((t["service_id"], t["route_id"], t["block_id"] or "trip:" + t["trip_id"]), len(blocks))
+    row = [li, int(t["direction_id"]), services.index(t["service_id"]), train]
     for _, sid, arr, dep in sorted(times[t["trip_id"]]):
         if station(sid)["name"] in idx: row += [idx[station(sid)["name"]], arr, dep]
-    if len(row) > 6: sched["trips"].append(row)
+    if len(row) > 7: sched["trips"].append(row)
 json.dump(sched, open(os.path.join(here, "schedule.json"), "w"), separators=(",", ":"))
-print(len(sched["trips"]), "rail trips,", len(services), "services")
+print(len(sched["trips"]), "rail trips,", len(blocks), "trains,", len(services), "services")
 for l in out: print(l["name"], l["headsigns"], len(l["shape"]), "pts,", len(l["stations"]), "stations,", len(l["stop_names"]), "stop ids")

@@ -223,7 +223,7 @@ const trainSvg = (c) => `<svg viewBox="0 0 100 24" aria-hidden="true">
   <rect x="35" y="6" width="8" height="3" rx="1" fill="#9aa0a6"/><rect x="2.2" y="7" width="1.6" height="10" rx=".8" fill="#d30f1d"/>
 </svg>`;
 
-const trains = new Map(); // trip index -> { marker, info }
+const trains = new Map(); // train id -> { marker, info }
 
 // Ottawa wall-clock: service date (YYYYMMDD), weekday (0 = Monday) and seconds since midnight.
 const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit",
@@ -243,15 +243,16 @@ function running(day) { // service indices running on that Ottawa day
 // Where a trip is at time t (seconds after its service day's midnight), or null if not running.
 const ease = (f) => f * f * (3 - 2 * f); // accelerate out of a station, brake into the next
 function locate(row, t) {
-  const n = (row.length - 3) / 3, l = LINES[row[0]], at = (i, k) => row[3 + i * 3 + k];
+  const n = (row.length - 4) / 3, l = LINES[row[0]], at = (i, k) => row[4 + i * 3 + k]; // row: line, dir, service, train, stops…
   if (t < at(0, 1) - 60 || t > at(n - 1, 2) + 30) return null; // appear a minute early at the terminus, linger 30 s
+  const meta = { done: t > at(n - 1, 1), start: at(0, 1) }; // used to pick one trip per physical train
   for (let i = 0; i < n; i++) {
     const arr = at(i, 1), dep = at(i, 2) + DWELL_S;
-    if (t <= dep || i === n - 1) return { l, d: l.sd[at(i, 0)], i, stopped: true, next: i, sign: i < n - 1 && l.sd[at(i + 1, 0)] < l.sd[at(i, 0)] ? -1 : 1, eta: i < n - 1 ? at(i, 2) : arr }; // at a station: its departure time
+    if (t <= dep || i === n - 1) return { l, d: l.sd[at(i, 0)], i, stopped: true, next: i, sign: i < n - 1 && l.sd[at(i + 1, 0)] < l.sd[at(i, 0)] ? -1 : 1, eta: i < n - 1 ? at(i, 2) : arr, ...meta }; // at a station: its departure time
     const nArr = at(i + 1, 1);
     if (t < nArr) {
       const a = l.sd[at(i, 0)], b = l.sd[at(i + 1, 0)], f = (t - dep) / Math.max(1, nArr - dep);
-      return { l, d: a + (b - a) * ease(Math.min(1, Math.max(0, f))), i, stopped: false, next: i + 1, sign: b < a ? -1 : 1, eta: nArr };
+      return { l, d: a + (b - a) * ease(Math.min(1, Math.max(0, f))), i, stopped: false, next: i + 1, sign: b < a ? -1 : 1, eta: nArr, ...meta };
     }
   }
   return null;
@@ -317,12 +318,17 @@ function frame() {
     yesterday = running(ottawa(nowMs - 86400000)); // after-midnight trips belong to yesterday's service (times > 24:00)
     stale = Object.values(sched.services).every((c) => c.end < now.date && !c.add.some((d) => d >= now.date));
   }
-  const t = now.sec + (nowMs % 1000) / 1000, seen = new Set();
-  sched.trips.forEach((row, k) => {
+  const t = now.sec + (nowMs % 1000) / 1000, seen = new Set(), best = new Map();
+  for (const row of sched.trips) {
     const pos = (today.has(row[2]) && locate(row, t)) || (yesterday.has(row[2]) && locate(row, t + 86400));
-    if (!pos) return;
+    if (!pos) continue;
     const dn = down[pos.l.route_id];
-    if (dn && pos.d >= dn[0] - 50 && pos.d <= dn[1] + 50) return; // buses replacing trains here
+    if (dn && pos.d >= dn[0] - 50 && pos.d <= dn[1] + 50) continue; // buses replacing trains here
+    // At a terminus one train can have two trips live (one arriving, its next one about to leave): show the one still running.
+    const cur = best.get(row[3]);
+    if (!cur || (cur.pos.done && !pos.done) || (cur.pos.done === pos.done && pos.start < cur.pos.start)) best.set(row[3], { row, pos });
+  }
+  for (const [k, { row, pos }] of best) { // k = physical train, so its marker carries over when it turns around
     seen.add(k);
     let tr = trains.get(k);
     if (!tr) {
@@ -338,9 +344,9 @@ function frame() {
     // Sprite points east; marker rotation is clockwise from north.
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
     if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
-    const stn = pos.l.stations[row[3 + pos.next * 3]].name;
+    const stn = pos.l.stations[row[4 + pos.next * 3]].name;
     tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
-  });
+  }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
   for (const b of buses.values()) { // glide to each new GPS fix instead of jumping
     b.at = b.at.map((x, i) => x + (b.to[i] - x) * 0.02);
