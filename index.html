@@ -43,7 +43,7 @@
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
 // Worker URL (see README). ?feed=<url> overrides it for testing.
-const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.REPLACE_ME.workers.dev";
+const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.otrain-map.workers.dev";
 const POLL_MS = 15000, STALE_S = 300;
 // ponytail: trains glide along the track between ~30s GPS fixes by dead reckoning at a typical speed.
 // Looks alive, not exact. Per-segment speeds from the schedule would be the upgrade if accuracy matters.
