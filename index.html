@@ -16,7 +16,23 @@
   .legend > span { display: flex; align-items: center; gap: 5px; }
   .status { margin-top: 8px; font-size: 12px; color: #555; }
   .note { margin-top: 4px; font-size: 12px; color: #595959; max-width: 240px; }
-  .toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; cursor: pointer; }
+  .toggle { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: 14px; cursor: pointer; white-space: nowrap; }
+  /* Layers button: MapLibre control group in the bottom-right, panel opens to its left. */
+  .layers { position: relative; }
+  .layers > button svg { width: 18px; height: 18px; margin: auto; display: block; }
+  .layers-panel { position: absolute; right: calc(100% + 8px); bottom: 0; background: #fff; border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.2); padding: 6px 12px; }
+  .layers-panel[hidden] { display: none; }
+  /* Info card collapses to title + status (closed by default on phones). */
+  .card summary { list-style: none; cursor: pointer; }
+  .card summary::-webkit-details-marker { display: none; }
+  .card summary h1 { display: flex; align-items: center; gap: 8px; }
+  .card summary h1::after { content: ""; width: 7px; height: 7px; border: solid #555; border-width: 0 2px 2px 0;
+    transform: rotate(45deg) translateY(-2px); transition: transform .15s; }
+  .card details[open] summary h1::after { transform: rotate(-135deg) translateY(-2px); }
+  .card summary .status { margin-top: 0; }
+  .card details[open] summary { margin-bottom: 8px; }
+  @media (max-width: 640px) { .card { padding: 10px 12px; } .card h1 { font-size: 16px; } }
   .badge { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 16px;
     display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); box-sizing: border-box; }
   .legend .badge { width: 22px; height: 22px; font-size: 13px; }
@@ -38,12 +54,11 @@
 <body>
 <div id="map"></div>
 <div class="card">
-  <h1>O-Train Live</h1>
-  <div class="legend" id="legend"></div>
-  <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
-  <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
-  <div class="status" id="status" role="status">Loading…</div>
-  <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
+  <details id="info" open>
+    <summary><h1>O-Train Live</h1><div class="status" id="status" role="status">Loading…</div></summary>
+    <div class="legend" id="legend"></div>
+    <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
+  </details>
   <div id="alerts"></div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -66,16 +81,6 @@ const sizeTrains = () => map.getContainer().style.setProperty("--len", `${Math.m
 map.on("zoom", sizeTrains);
 sizeTrains();
 
-// Checkbox remembered per viewer; apply(on) runs now and on change.
-const pref = (id, def, apply) => {
-  const el = document.getElementById(id);
-  try { const v = localStorage.getItem(id); if (v) el.checked = v === "1"; else el.checked = def; } catch { el.checked = def; }
-  const go = () => { apply(el.checked); try { localStorage.setItem(id, el.checked ? "1" : "0"); } catch {} };
-  el.addEventListener("change", go);
-  return go;
-};
-pref("models", true, (on) => document.body.classList.toggle("dots", !on))();
-const applySat = pref("sat", false, (on) => map.getLayer("sat") && map.setLayoutProperty("sat", "visibility", on ? "visible" : "none"));
 
 // One shared hover popup for stations and trains.
 const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12 });
@@ -86,6 +91,42 @@ const hover = (el, getLngLat, getHtml) => {
 
 const div = (cls, html = "") => Object.assign(document.createElement("div"), { className: cls, innerHTML: html });
 const ll = ([la, lo]) => [lo, la];
+
+// Layers button (added after the nav control, so it stacks above it).
+map.addControl({
+  onAdd() {
+    const el = div("maplibregl-ctrl maplibregl-ctrl-group layers", `
+      <button type="button" aria-label="Map layers" aria-expanded="false" title="Map layers">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 16 10 5 10-5"/></svg>
+      </button>
+      <div class="layers-panel" hidden>
+        <label class="toggle"><input type="checkbox" id="sat"> Satellite</label>
+        <label class="toggle"><input type="checkbox" id="models" checked> Train models</label>
+      </div>`);
+    const btn = el.querySelector("button"), panel = el.querySelector(".layers-panel");
+    const show = (on) => { panel.hidden = !on; btn.setAttribute("aria-expanded", on); };
+    btn.addEventListener("click", () => show(panel.hidden));
+    document.addEventListener("click", (e) => { if (!el.contains(e.target)) show(false); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") show(false); });
+    return el;
+  },
+  onRemove() {},
+}, "bottom-right");
+
+const card = document.querySelector(".card"), phone = matchMedia("(max-width: 640px)");
+document.getElementById("info").open = !phone.matches; // phones start with the info card collapsed
+
+// Checkbox remembered per viewer; apply(on) runs now and on change.
+const pref = (id, def, apply) => {
+  const el = document.getElementById(id);
+  try { const v = localStorage.getItem(id); if (v) el.checked = v === "1"; else el.checked = def; } catch { el.checked = def; }
+  const go = () => { apply(el.checked); try { localStorage.setItem(id, el.checked ? "1" : "0"); } catch {} };
+  el.addEventListener("change", go);
+  return go;
+};
+pref("models", true, (on) => document.body.classList.toggle("dots", !on))();
+const applySat = pref("sat", false, (on) => map.getLayer("sat") && map.setLayoutProperty("sat", "visibility", on ? "visible" : "none"));
 
 Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
   // Satellite sits above the basemap's fills/roads but under its labels, so place names stay readable.
@@ -126,7 +167,9 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   }
   const b = new maplibregl.LngLatBounds();
   lines.forEach((l) => l.shape.forEach((p) => b.extend(ll(p))));
-  const fit = () => map.fitBounds(b, { padding: { top: 60, bottom: 30, left: 30, right: 30 }, animate: false });
+  const fit = () => map.fitBounds(b, { animate: false, padding: phone.matches
+    ? { top: card.offsetHeight + 20, bottom: 20, left: 20, right: 56 } // clear the collapsed card and the controls
+    : { top: 60, bottom: 30, left: 30, right: 30 } });
   fit();
   // A tab opened in the background has no size yet, so the first fit is wrong: refit on resize until the viewer moves the map.
   let touched = false;
