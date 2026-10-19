@@ -203,6 +203,12 @@ Promise.all([fetch("lines.json").then((r) => r.json()), fetch("depots.json").the
     document.getElementById("legend").insertAdjacentHTML("beforeend",
       `<span><span class="badge" style="background:${l.color}">${l.name}</span>Line ${l.name}</span>`);
   }
+  // Yellow route ahead of each train running to its yard (frame() fills it), with a dark edge so it reads on the light basemap.
+  map.addSource("to-yard", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "to-yard-casing", type: "line", source: "to-yard", layout: { "line-join": "round", "line-cap": "round" },
+    paint: { "line-color": "rgba(0,0,0,.45)", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 4, 16, 8] } });
+  map.addLayer({ id: "to-yard", type: "line", source: "to-yard", layout: { "line-join": "round", "line-cap": "round" },
+    paint: { "line-color": "#ffd21f", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 16, 5] } });
   for (const l of lines) l.sd = l.stations.map((s) => project(l, s.lat, s.lon)); // station distance along the line
   const seen = new Set();
   for (const l of lines) {
@@ -377,7 +383,7 @@ function slice(l, a, b) { // line coordinates between two distances
 }
 
 const hhmm = (s) => `${Math.floor(s / 3600) % 24}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`;
-let lastScan = 0, today, yesterday, stale;
+let lastScan = 0, today, yesterday, stale, lastYardDraw = 0, yardDrawn = 0;
 function frame() {
   const nowMs = Date.now(), now = ottawa(nowMs);
   if (nowMs - lastScan > 60000) { // service calendars only change at midnight
@@ -397,6 +403,7 @@ function frame() {
     if (!cur || (cur.pos.done && !pos.done) || (cur.pos.done === pos.done && pos.start < cur.pos.start)) best.set(row[3], { row, pos });
   }
   let inYard = 0;
+  const toYardLines = [];
   for (const [k, row] of lastRun) {
     if (best.has(k)) continue;
     const pos = (today.has(row[2]) && toYard(row, t)) || (yesterday.has(row[2]) && toYard(row, t + 86400));
@@ -408,6 +415,7 @@ function frame() {
       if (d >= dn[0] - 50 && d <= dn[1] + 50 && Math.hypot((x - lo) * KX, (y - la) * KY) < 50) continue; // on the line, in the gap
     }
     best.set(k, { row, pos }); inYard++;
+    toYardLines.push(slice(pos.l, pos.d, pos.l.length));
   }
   for (const [k, { row, pos }] of best) { // k = physical train, so its marker carries over when it turns around
     seen.add(k);
@@ -431,6 +439,12 @@ function frame() {
       : `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${pos.l.stations[row[4 + pos.next * 3]].name}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
+  // ponytail: redrawn 4x a second, not every frame; the train sprite covers the tail end in between.
+  if ((toYardLines.length || yardDrawn) && nowMs - lastYardDraw > 250) {
+    lastYardDraw = nowMs; yardDrawn = toYardLines.length;
+    map.getSource("to-yard").setData({ type: "FeatureCollection",
+      features: toYardLines.map((c) => ({ type: "Feature", geometry: { type: "LineString", coordinates: c } })) });
+  }
   if (pinned != null) { // keep the pinned popup on its train; drop it when the train leaves service
     const tr = trains.get(pinned);
     if (!tr) unpin();
