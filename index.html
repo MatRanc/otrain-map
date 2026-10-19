@@ -385,7 +385,7 @@ function slice(l, a, b) { // line coordinates between two distances
 }
 
 const hhmm = (s) => `${Math.floor(s / 3600) % 24}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`;
-let lastScan = 0, today, yesterday, stale, lastYardDraw = 0, yardDrawn = 0;
+let lastScan = 0, today, yesterday, stale, yardDrawn = 0;
 function frame() {
   const nowMs = Date.now(), now = ottawa(nowMs);
   if (nowMs - lastScan > 60000) { // service calendars only change at midnight
@@ -441,9 +441,8 @@ function frame() {
       : `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${pos.l.stations[row[4 + pos.next * 3]].name}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
-  // ponytail: redrawn 4x a second, not every frame; the train sprite covers the tail end in between.
-  if ((toYardLines.length || yardDrawn) && nowMs - lastYardDraw > 250) {
-    lastYardDraw = nowMs; yardDrawn = toYardLines.length;
+  if (toYardLines.length || yardDrawn) { // every frame so the tail stays under the train; nothing to send when no train is yard-bound
+    yardDrawn = toYardLines.length;
     map.getSource("to-yard").setData({ type: "FeatureCollection",
       features: toYardLines.map((c) => ({ type: "Feature", geometry: { type: "LineString", coordinates: c } })) });
   }
