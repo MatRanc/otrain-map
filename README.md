@@ -25,3 +25,4 @@ Animated map of OC Transpo O-Train Lines 1, 2 and 4 at **[otrain.matranc.com](ht
 - `python3 -m http.server` then open `/?feed=<url>` to point at any feed (e.g. a local mock JSON).
 - `node test_worker.mjs` checks the protobuf decoder.
 - Line shapes/stations: download https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip, unzip, `python3 build_lines.py <dir>` → `lines.json` (station positions come from OpenStreetMap via Overpass, snapped onto the line). Rerun when OC Transpo changes service (e.g. Line 1 extensions open).
+- Yards: `python3 build_depots.py` → `depots.json`, the OSM yard track from the main line into Belfast (Line 1) and Walkley (Lines 2/4). After its last trip a train runs empty there. Rerun if the lines or yards change.

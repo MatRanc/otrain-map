@@ -61,6 +61,7 @@
     <summary><h1>O-Train Live</h1><div class="status" id="status" role="status">Loading…</div></summary>
     <div class="legend" id="legend"></div>
     <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
+    <div class="note">If part of a line is down, it turns grey and dashed, its trains disappear, and the live R1/R2/R4 replacement buses take their place. After their last run, trains head back to the yard.</div>
   </details>
   <div id="alerts"></div>
 </div>
@@ -72,7 +73,8 @@ const DWELL_S = 12; // GTFS lists arrival == departure; hold trains this long so
 // ?feed=<url> overrides it for testing.
 const FEED = new URLSearchParams(location.search).get("feed") || "https://otrain-feed.otrain-map.workers.dev";
 const POLL_MS = 60000;
-let sched, LINES;
+const YARD_MS = 12; // m/s (~45 km/h) running empty to the yard after a train's last trip
+let sched, LINES, DEPOTS, lastRun;
 
 const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty",
   center: [-75.69, 45.37], zoom: 10.5, attributionControl: false });
@@ -176,7 +178,8 @@ const applyThree = pref("three", false, async (on) => {
 });
 
 
-Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(([lines]) => {
+Promise.all([fetch("lines.json").then((r) => r.json()), fetch("depots.json").then((r) => r.json()), map.once("load")]).then(([lines, depots]) => {
+  DEPOTS = depots;
   // The style draws flat buildings only at zoom 13–14, then 3D from 14: drop the flat band and start 3D at 13.
   if (map.getLayer("building")) map.removeLayer("building");
   if (map.getLayer("building-3d")) map.setLayerZoomRange("building-3d", 13, 24);
@@ -224,7 +227,11 @@ Promise.all([fetch("lines.json").then((r) => r.json()), map.once("load")]).then(
   // A tab opened in the background has no size yet, so the first fit is wrong: refit on resize until the viewer moves the map.
   map.on("movestart", (e) => { if (e.originalEvent) touched = true; });
   map.on("resize", () => { if (!touched) homeView(); });
-  return fetch("schedule.json").then((r) => r.json()).then((s) => { sched = s; LINES = lines; requestAnimationFrame(frame); poll(); applyThree(); });
+  return fetch("schedule.json").then((r) => r.json()).then((s) => {
+    sched = s; LINES = lines;
+    lastRun = new Map(); // train -> its last trip of the service day
+    for (const r of s.trips) if (!lastRun.has(r[3]) || r.at(-2) > lastRun.get(r[3]).at(-2)) lastRun.set(r[3], r);
+    requestAnimationFrame(frame); poll(); applyThree(); });
 });
 
 // Track geometry: flat-earth metres are plenty at city scale.
@@ -300,6 +307,25 @@ function locate(row, t) {
   return null;
 }
 
+// After its last trip a train runs empty from where it ended, along the line and the yard track (depots.json), into its yard.
+// Line 4 has no yard: its trains run up Line 2 to Walkley. The route is a pseudo-line, so pointAt and the 3D models just work.
+const yardPaths = {};
+function yardPath(row) {
+  const l = LINES[row[0]], end = l.sd[row.at(-3)], key = row[0] + ":" + end;
+  if (yardPaths[key]) return yardPaths[key];
+  const l2 = LINES.find((x) => x.name === "2"), dep = DEPOTS[l.name === "4" ? "2" : l.name], yard = dep.path;
+  const at = (x, name) => x.sd[x.stations.findIndex((s) => s.name === name)];
+  const run = ([x, a, b]) => a <= b ? slice(x, a, b) : slice(x, b, a).reverse();
+  const legs = l.name === "4" ? [[l, end, at(l, "South Keys")], [l2, at(l2, "South Keys"), project(l2, ...yard[0])]] : [[l, end, project(l, ...yard[0])]];
+  const p = { name: l.name, color: l.color, yard: dep.name, shape: [...legs.flatMap(run).map(ll), ...yard] };
+  measure(p);
+  return (yardPaths[key] = p);
+}
+function toYard(row, t) {
+  const p = yardPath(row), s = t - (row.at(-1) + 30); // locate() lingers 30 s at the last stop
+  return s >= 0 && s <= p.length / YARD_MS ? { l: p, d: p.length * ease(s * YARD_MS / p.length), sign: 1, yard: true } : null;
+}
+
 const down = {}; // route_id -> [from, to] metres along the line where R-buses are replacing trains
 const buses = new Map(); // vehicle id -> { marker, at: [lon, lat], to: [lon, lat] }
 async function poll() {
@@ -370,6 +396,12 @@ function frame() {
     const cur = best.get(row[3]);
     if (!cur || (cur.pos.done && !pos.done) || (cur.pos.done === pos.done && pos.start < cur.pos.start)) best.set(row[3], { row, pos });
   }
+  let inYard = 0;
+  for (const [k, row] of lastRun) {
+    if (best.has(k)) continue;
+    const pos = (today.has(row[2]) && toYard(row, t)) || (yesterday.has(row[2]) && toYard(row, t + 86400));
+    if (pos) { best.set(k, { row, pos }); inYard++; }
+  }
   for (const [k, { row, pos }] of best) { // k = physical train, so its marker carries over when it turns around
     seen.add(k);
     let tr = trains.get(k);
@@ -388,8 +420,8 @@ function frame() {
     const dx = (ahead[0] - here[0]) * KX, dy = (ahead[1] - here[1]) * KY;
     if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
     Object.assign(tr, { l: pos.l, here, d: pos.d, sign: pos.sign });
-    const stn = pos.l.stations[row[4 + pos.next * 3]].name;
-    tr.info = `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${stn}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
+    tr.info = pos.yard ? `<b>Line ${pos.l.name}, not in service</b><br>Heading to ${pos.l.yard}`
+      : `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${pos.l.stations[row[4 + pos.next * 3]].name}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
   }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
   if (pinned != null) { // keep the pinned popup on its train; drop it when the train leaves service
@@ -403,8 +435,9 @@ function frame() {
   }
   const status = document.getElementById("status");
   const downLines = LINES.filter((l) => down[l.route_id]).map((l) => `Line ${l.name}`);
-  status.textContent = stale ? "Timetable out of date: rerun build_lines.py" : (seen.size ? `${seen.size} train${seen.size === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now")
-    + (downLines.length ? ` · replacement buses on ${downLines.join(", ")}` : "");
+  const live = seen.size - inYard;
+  status.textContent = stale ? "Timetable out of date: rerun build_lines.py" : (live ? `${live} train${live === 1 ? "" : "s"} on the timetable right now` : "No trains scheduled right now")
+    + (inYard ? ` · ${inYard} heading to the yard` : "") + (downLines.length ? ` · replacement buses on ${downLines.join(", ")}` : "");
   if (document.body.classList.contains("three")) map.triggerRepaint(); // the 3D layer redraws trains every frame
   requestAnimationFrame(frame);
 }
