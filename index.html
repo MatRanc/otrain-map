@@ -400,7 +400,14 @@ function frame() {
   for (const [k, row] of lastRun) {
     if (best.has(k)) continue;
     const pos = (today.has(row[2]) && toYard(row, t)) || (yesterday.has(row[2]) && toYard(row, t + 86400));
-    if (pos) { best.set(k, { row, pos }); inYard++; }
+    if (!pos) continue;
+    // ponytail: hidden through a closed section like the in-service trains; Line 4 runs on Line 2 track, so not checked.
+    const l = LINES[row[0]], dn = down[l.route_id];
+    if (dn) {
+      const [lo, la] = pointAt(pos.l, pos.d), d = project(l, la, lo), [x, y] = pointAt(l, d);
+      if (d >= dn[0] - 50 && d <= dn[1] + 50 && Math.hypot((x - lo) * KX, (y - la) * KY) < 50) continue; // on the line, in the gap
+    }
+    best.set(k, { row, pos }); inYard++;
   }
   for (const [k, { row, pos }] of best) { // k = physical train, so its marker carries over when it turns around
     seen.add(k);
