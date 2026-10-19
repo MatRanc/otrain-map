@@ -204,11 +204,13 @@ Promise.all([fetch("lines.json").then((r) => r.json()), fetch("depots.json").the
       `<span><span class="badge" style="background:${l.color}">${l.name}</span>Line ${l.name}</span>`);
   }
   // Yellow route ahead of each train running to its yard (frame() fills it), with a dark edge so it reads on the light basemap.
+  // It sits under the coloured lines, as wide as their white casing, so on the main line it shows as a yellow border.
   map.addSource("to-yard", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({ id: "to-yard-casing", type: "line", source: "to-yard", layout: { "line-join": "round", "line-cap": "round" },
-    paint: { "line-color": "rgba(0,0,0,.45)", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 4, 16, 8] } });
+    paint: { "line-color": "rgba(0,0,0,.45)", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 9, 16, 17] } }, lines[0].route_id);
   map.addLayer({ id: "to-yard", type: "line", source: "to-yard", layout: { "line-join": "round", "line-cap": "round" },
-    paint: { "line-color": "#ffd21f", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 16, 5] } });
+    paint: { "line-color": "#ffd21f", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 7, 16, 14] } }, lines[0].route_id);
+  for (const l of lines) map.moveLayer(l.route_id + "-casing", "to-yard-casing"); // every white casing below it
   for (const l of lines) l.sd = l.stations.map((s) => project(l, s.lat, s.lon)); // station distance along the line
   const seen = new Set();
   for (const l of lines) {
