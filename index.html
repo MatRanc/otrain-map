@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>O-Train Live</title>
+<title>O-Train Visualizer</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
@@ -60,9 +60,9 @@
 <div id="map"></div>
 <div class="card">
   <details id="info" open>
-    <summary><h1>O-Train Live</h1><div class="status" id="status" role="status">Loading…</div></summary>
+    <summary><h1>O-Train Visualizer</h1><div class="status" id="status" role="status">Loading…</div></summary>
     <div class="legend" id="legend"></div>
-    <div class="note">Positions follow the timetable. OC Transpo doesn't publish live O-Train locations.</div>
+    <div class="note">Trains follow the timetable, not live tracking: a real train can be a minute or so early or late. OC Transpo doesn't publish live O-Train locations.</div>
     <div class="note">If part of a line is down, it turns grey and dashed, its trains disappear, and the live R1/R2/R4 replacement buses take their place.</div>
   </details>
   <div id="alerts"></div>
@@ -440,7 +440,7 @@ function frame() {
     if (dx || dy) tr.marker.setRotation(Math.atan2(dx, dy) * 180 / Math.PI - 90);
     Object.assign(tr, { l: pos.l, here, d: pos.d, sign: pos.sign });
     tr.info = pos.yard ? `<b>Line ${pos.l.name}, not in service</b><br>Heading to ${pos.l.yard}`
-      : `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "At" : "Next:"} ${pos.l.stations[row[4 + pos.next * 3]].name}<br><small>Scheduled for ${hhmm(pos.eta)}</small>`;
+      : `<b>Line ${pos.l.name} to ${pos.l.headsigns[row[1]]}</b><br>${pos.stopped ? "Near" : "Next:"} ${pos.l.stations[row[4 + pos.next * 3]].name}<br><small>Scheduled ${hhmm(pos.eta)} (±1 min)</small>`;
   }
   for (const [k, tr] of trains) if (!seen.has(k)) { tr.marker.remove(); trains.delete(k); }
   if (toYardLines.length || yardDrawn) { // every frame so the tail stays under the train; nothing to send when no train is yard-bound

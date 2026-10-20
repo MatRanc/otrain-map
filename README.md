@@ -1,4 +1,4 @@
-# O-Train Live
+# O-Train Visualizer
 
 Animated map of OC Transpo O-Train Lines 1, 2 and 4 at **[otrain.matranc.com](https://otrain.matranc.com)**. Static site on GitHub Pages plus a tiny Cloudflare Worker.
 
@@ -10,7 +10,7 @@ Animated map of OC Transpo O-Train Lines 1, 2 and 4 at **[otrain.matranc.com](ht
 
 <img src="docs/phone.jpg" alt="Phone layout: collapsed info card, whole network in view" width="300">
 
-- **Trains** follow the published timetable (`schedule.json`, built from OC Transpo's static GTFS). OC Transpo's GTFS-RT feeds carry buses only, with no O-Train positions.
+- **Trains are not live-tracked.** They follow the published timetable (`schedule.json`, built from OC Transpo's static GTFS). Neither OC Transpo GTFS-RT feed (VehiclePositions, TripUpdates) has O-Train data, only buses, and the old next-trips API is gone, so a real train can be a minute or so off what the map shows.
 - **Live disruptions** come through the Worker: R1/R2/R4 replacement buses in the GTFS-RT vehicle feed grey out the section they cover, and O-Train items from the service-updates RSS show as alerts. The Worker holds the API key and adds CORS, since the feed only allows OC Transpo's own portal.
 
 ## Setup
