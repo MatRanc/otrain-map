@@ -128,7 +128,10 @@ def placed(st, shape):
     return st
 
 out = []
-for rid in sorted(routes, key=lambda r: int(routes[r]["route_sort_order"])):
+# OC Transpo sometimes ships an empty route_sort_order for the rail routes; fall back to the line number.
+line_no = lambda r: int(m.group()) if (m := re.search(r"\d+", r["route_short_name"])) else 0
+order = lambda r: int(v) if (v := r["route_sort_order"].strip()).isdigit() else line_no(r)
+for rid in sorted(routes, key=lambda r: order(routes[r])):
     r, t0 = routes[rid], best[(rid, "0")][1]
     dirs = [best[(rid, d)][1] for d in "01" if (rid, d) in best]
     line_shape = smooth([[la, lo] for _, la, lo in sorted(shapes[t0["shape_id"]])])
